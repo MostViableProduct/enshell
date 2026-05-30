@@ -1,0 +1,69 @@
+# enShell
+
+> **Natural language for your terminal**
+
+enShell is a cross-platform, AI-native shell layer for macOS, Linux, and Windows.
+You describe what you want in plain English instead of memorizing terminal commands;
+enShell explains its plan, shows the exact command, labels the risk, and asks for
+confirmation before doing anything. Inference runs **locally by default** (Gemma 4
+via llama.cpp), so your requests don't leave your machine.
+
+```bash
+enshell "show me what is using port 3000"
+enshell "find the biggest files in my Downloads folder"
+enshell "why did the last command fail?"
+```
+
+## Status
+
+**Planning (Phase 0).** This repository currently contains the project's planning
+documentation only — there is **no runnable code yet**. The CLI, crates, and
+behaviors described here are a design, not a shipped product.
+
+## How it works (design)
+
+enShell is a **command broker, not an autopilot**. The local model never executes
+commands — it proposes a *structured intent*, and trusted Rust code validates it,
+classifies its risk, renders the correct OS-specific command (as a structured plan,
+not a shell string), previews it in plain English, and executes only after you
+confirm.
+
+📄 **Full plan:** [`docs/planning/enshell-ai-native-shell-plan.md`](docs/planning/enshell-ai-native-shell-plan.md)
+
+## Planned highlights
+
+- **Local-first by default** — Gemma 4 E4B (Q4) via llama.cpp; guided install, no
+  silent download; telemetry off; no cloud dependency.
+- **Five-layer architecture** — natural-language wrapper → safety/policy broker →
+  local model runtime → shell integration → OS-level adapters.
+- **Safety first** — eight-tier risk policy; destructive/privileged actions denied
+  by default; typed confirmation for the riskiest; structured execution with no
+  shell interpreter.
+- **Transparent & reversible** — plain-English previews, tamper-evident local audit
+  log, and a three-tier recovery model (auto / assisted / irreversible).
+- **Privacy-minimal** — captures only OS/shell type, working directory, last exit
+  code, and enShell's own history by default; everything else is opt-in.
+- **Cross-platform** — macOS, Linux, and Windows (PowerShell-first).
+
+## Roadmap (summary)
+
+Phase 0 research & design → Phase 1 read-only MVP (macOS/Linux) → Phase 2
+cross-platform core (+Windows) → Phase 3 safe system actions → Phase 4
+non-technical UX → Phase 5 autonomous maintenance agents → Phase 6 ecosystem.
+See the planning document for details.
+
+## Contributing
+
+Early governance uses the **Developer Certificate of Origin (DCO)** — sign off your
+commits with `git commit -s`. No CLA is required at launch.
+
+## License
+
+enShell's source and documentation are licensed under the **Apache License 2.0** —
+see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+
+External components (llama.cpp, Gemma 4 model weights, OS tools, package managers)
+are **separately licensed** and not covered by enShell's license; see
+[`NOTICE`](NOTICE). Model weights are **not** bundled. Final licensing and
+distribution should be reviewed by counsel before any public release beyond this
+planning stage.

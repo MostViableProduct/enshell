@@ -1,0 +1,32 @@
+enShell
+Copyright 2026 enShell contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository currently contains planning documentation only; no third-party
+source code is bundled yet. As the project adds dependencies and integrations,
+attribution for third-party components will be tracked here and in the
+accompanying files described in the planning document:
+
+  - THIRD_PARTY_NOTICES.md  — third-party source dependencies and their licenses
+  - MODEL_LICENSES.md       — model-weight licenses and attribution
+  - DEPENDENCIES.md         — generated dependency/license inventory
+
+External components that enShell is designed to use are separately licensed and
+are NOT covered by enShell's Apache-2.0 license. In particular:
+
+  - llama.cpp — (c) its authors, MIT License. A separate work, invoked/linked,
+    not relicensed and not bundled in this repository.
+  - Gemma 4 model weights — (c) Google, released under the Apache License,
+    Version 2.0. The weights are a separate work with their own copyright and
+    attribution; enShell does not bundle or redistribute them, and guides the
+    user through obtaining them. Confirm the exact terms for the specific model
+    and version against Google's official model card before distribution
+    (earlier Gemma versions used different terms). See MODEL_LICENSES.md.
+
+This separation is intentional ("mere aggregation"): enShell's Apache-2.0 grant
+applies to enShell's own code and documentation, not to external tools, model
+weights, package managers, or operating-system utilities it interoperates with.
+
+NOTE: Licensing and distribution should be reviewed by qualified counsel before
+any public release beyond this planning stage.
