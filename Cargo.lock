@@ -5,6 +5,10 @@ version = 4
 [[package]]
 name = "enshell-adapters"
 version = "0.0.0"
+dependencies = [
+ "enshell-intents",
+ "enshell-os",
+]
 
 [[package]]
 name = "enshell-cli"
@@ -56,6 +60,12 @@ version = "0.0.0"
 [[package]]
 name = "enshell-tests"
 version = "0.0.0"
+dependencies = [
+ "enshell-adapters",
+ "enshell-intents",
+ "enshell-os",
+ "enshell-policy",
+]
 
 [[package]]
 name = "itoa"
