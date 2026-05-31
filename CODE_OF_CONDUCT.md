@@ -103,11 +103,15 @@ This Code of Conduct also applies when an individual is officially representing 
 
 If you experience or witness unacceptable behavior, please report it to the project maintainers.
 
-Until the project has a dedicated reporting address, reports may be sent to:
+The project intentionally does not publish a personal email address at this stage.
+Reports can be made privately through GitHub:
 
-```text
-TODO: Add maintainer contact email
-```
+- Contact a **MostViableProduct** organization maintainer directly through GitHub, or
+- Open a private report via this repository's **Security** tab
+  (**"Report a vulnerability"**), which routes privately to the maintainers.
+
+A dedicated, separate reporting address may be added as the project's governance
+matures.
 
 Reports should include, when possible:
 
@@ -176,11 +180,10 @@ Possible outcome:
 
 If the issue involves a security vulnerability, unsafe command execution, privilege escalation, secret exposure, malicious dependency, prompt injection exploit, or harmful agent behavior, please follow the project’s security reporting process instead of posting publicly.
 
-Until a dedicated process exists, use:
-
-```text
-TODO: Add security contact email or SECURITY.md process
-```
+Follow the process in [`SECURITY.md`](SECURITY.md): use **GitHub private
+vulnerability reporting** via this repository's **Security** tab
+(**"Report a vulnerability"**), which routes privately to the maintainers. Do not
+open a public issue for security matters.
 
 Security reports should not be used to harass contributors or bypass normal community moderation. Likewise, Code of Conduct reports should not be used to suppress legitimate security research or good-faith vulnerability disclosure.
 
