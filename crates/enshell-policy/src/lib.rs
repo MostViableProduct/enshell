@@ -183,10 +183,27 @@ pub fn classify(intent: &Intent, ctx: &ClassifyContext) -> RiskDecision {
             RiskTier::ReadOnly,
             "find_process_using_port queries OS process/socket tables read-only",
         ),
-        Intent::OpenFileOrFolder { .. } => tier_decision(
-            RiskTier::ReadOnly,
-            "open_file_or_folder launches the system GUI viewer; no writes occur",
-        ),
+        // open_file_or_folder is intentionally NOT passed through the generic
+        // tier_decision(ReadOnly) path. Although it does not modify local files
+        // (ReadOnly tier), the underlying `open` / `xdg-open` command is a
+        // general-purpose handler dispatcher: it can open URLs (triggering network
+        // access), launch arbitrary applications, and invoke custom URI handlers —
+        // all with side effects the user must explicitly approve. Therefore:
+        //   • tier: ReadOnly (no local file writes)
+        //   • confirmation: Explicit (interactive [y/N] always required)
+        //   • yes_eligible: false (`--yes` must NEVER auto-run this)
+        Intent::OpenFileOrFolder { .. } => RiskDecision {
+            tier: RiskTier::ReadOnly,
+            confirmation: ConfirmationKind::Explicit,
+            requires_elevation_ack: false,
+            yes_eligible: false,
+            undo: UndoRequirement::NotApplicable,
+            deny_by_default: false,
+            reason: "open_file_or_folder launches an external handler (open/xdg-open) that can \
+                     open URLs, trigger network access, and launch arbitrary applications — it \
+                     always requires explicit confirmation and is never auto-run via --yes, even \
+                     though it does not modify local files",
+        },
         Intent::ExplainError { .. } => tier_decision(
             RiskTier::ReadOnly,
             "explain_error summarises a past failure in plain English; no execution",
@@ -424,10 +441,20 @@ pub fn requires_typed_confirmation(decision: &RiskDecision) -> bool {
     matches!(decision.tier, RiskTier::Destructive | RiskTier::Privileged)
 }
 
-/// Returns `true` if this action is executable in the MVP.
+/// Returns `true` if this action is at the **policy-tier gate** for MVP execution.
 ///
 /// The MVP executes **only** `ReadOnly` intents.  Everything above that tier may
 /// be classified and previewed but is not yet executed by the MVP runtime.
+///
+/// # Important: this is a policy-tier gate, NOT a command-existence check
+///
+/// Returning `true` means the *tier* is permitted to proceed — it does **not**
+/// mean the adapter can render a command for this intent.  Some `ReadOnly` intents
+/// (e.g. `ExplainError`, `FixLastCommand`) have no shell-command equivalent and are
+/// handled by the explanation/clarification layer instead.
+///
+/// Orchestration **MUST** also call `enshell_adapters::is_renderable` to confirm
+/// that a command exists before attempting to render and execute an intent.
 pub fn is_mvp_executable(decision: &RiskDecision) -> bool {
     decision.tier == RiskTier::ReadOnly
 }
@@ -491,6 +518,85 @@ mod tests {
         };
         let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::ReadOnly);
+    }
+
+    #[test]
+    fn open_file_or_folder_yes_not_eligible() {
+        // open/xdg-open can trigger network/app-launch handlers — never auto-run.
+        let intent = Intent::OpenFileOrFolder {
+            path: "/home/user/docs".into(),
+        };
+        let d = classify(&intent, &ctx_absent());
+        assert!(
+            !d.yes_eligible,
+            "open_file_or_folder must NOT be yes_eligible"
+        );
+    }
+
+    #[test]
+    fn open_file_or_folder_requires_explicit_confirmation() {
+        let intent = Intent::OpenFileOrFolder {
+            path: "/tmp/file.txt".into(),
+        };
+        let d = classify(&intent, &ctx_absent());
+        assert_eq!(
+            d.confirmation,
+            ConfirmationKind::Explicit,
+            "open_file_or_folder must require Explicit confirmation"
+        );
+    }
+
+    #[test]
+    fn open_file_or_folder_auto_confirm_blocked_with_yes() {
+        let intent = Intent::OpenFileOrFolder {
+            path: "/tmp/file.txt".into(),
+        };
+        let d = classify(&intent, &ctx_absent());
+        assert!(
+            !auto_confirm_allowed(&d, true),
+            "auto_confirm_allowed must return false for open_file_or_folder even with --yes"
+        );
+    }
+
+    #[test]
+    fn open_file_or_folder_is_mvp_executable() {
+        // Tier is ReadOnly, so is_mvp_executable is true (policy gate).
+        // Orchestration must separately check is_renderable.
+        let intent = Intent::OpenFileOrFolder {
+            path: "/tmp/file.txt".into(),
+        };
+        let d = classify(&intent, &ctx_absent());
+        assert!(
+            is_mvp_executable(&d),
+            "open_file_or_folder policy tier is ReadOnly → is_mvp_executable must be true"
+        );
+    }
+
+    #[test]
+    fn open_file_or_folder_undo_not_applicable() {
+        let intent = Intent::OpenFileOrFolder {
+            path: "/tmp".into(),
+        };
+        let d = classify(&intent, &ctx_absent());
+        assert_eq!(d.undo, UndoRequirement::NotApplicable);
+    }
+
+    #[test]
+    fn open_file_or_folder_not_deny_by_default() {
+        let intent = Intent::OpenFileOrFolder {
+            path: "/tmp".into(),
+        };
+        let d = classify(&intent, &ctx_absent());
+        assert!(!d.deny_by_default);
+    }
+
+    #[test]
+    fn open_file_or_folder_no_elevation_ack() {
+        let intent = Intent::OpenFileOrFolder {
+            path: "/tmp".into(),
+        };
+        let d = classify(&intent, &ctx_absent());
+        assert!(!d.requires_elevation_ack);
     }
 
     #[test]

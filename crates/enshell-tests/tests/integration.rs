@@ -79,6 +79,35 @@ fn write_intent_is_not_mvp_executable() {
     ));
 }
 
+/// `open_file_or_folder` is read-only tier but is side-effecting (launches an
+/// external handler), so it is never `--yes`-auto-runnable, and the adapter
+/// refuses URL/scheme arguments — only local paths render.
+#[test]
+fn open_file_or_folder_is_gated_and_rejects_urls() {
+    // Policy: read-only tier, but NOT --yes eligible (always requires confirmation).
+    let local = Intent::OpenFileOrFolder {
+        path: "/Users/example/notes.txt".to_string(),
+    };
+    let decision = classify(&local, &ClassifyContext::default());
+    assert_eq!(decision.tier, RiskTier::ReadOnly);
+    assert!(
+        !auto_confirm_allowed(&decision, true),
+        "--yes must never auto-run open_file_or_folder"
+    );
+
+    // Adapter: a local path renders to a shell-free Exec; a URL is rejected.
+    let plan = render(&local, Os::MacOs).expect("local path should render");
+    assert!(!plan_requires_shell(&plan));
+
+    let url = Intent::OpenFileOrFolder {
+        path: "http://example.com".to_string(),
+    };
+    assert!(matches!(
+        render(&url, Os::MacOs),
+        Err(AdapterError::InvalidParameter { .. })
+    ));
+}
+
 /// Intents that don't map to a command (clarification / explanation) are
 /// reported as unsupported by the adapter rather than producing a plan.
 #[test]

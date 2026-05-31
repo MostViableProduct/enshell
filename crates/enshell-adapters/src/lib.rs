@@ -64,6 +64,16 @@ pub enum AdapterError {
     /// The requested OS is not supported for this intent in the current slice.
     /// Currently `Windows` and `Other` fall into this bucket.
     UnsupportedOs { intent: &'static str, os: Os },
+
+    /// An intent-specific parameter was provided but is invalid for the
+    /// requested operation.  For example, passing a URL to
+    /// [`render`] for [`OpenFileOrFolder`](enshell_intents::Intent::OpenFileOrFolder)
+    /// is rejected because `open`/`xdg-open` can trigger network access and
+    /// arbitrary handler launches, which must never be rendered silently.
+    InvalidParameter {
+        intent: &'static str,
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for AdapterError {
@@ -77,6 +87,12 @@ impl fmt::Display for AdapterError {
             }
             AdapterError::UnsupportedOs { intent, os } => {
                 write!(f, "intent '{intent}' is not supported on {os:?}")
+            }
+            AdapterError::InvalidParameter { intent, reason } => {
+                write!(
+                    f,
+                    "intent '{intent}' parameter is invalid for rendering: {reason}"
+                )
             }
         }
     }
@@ -113,6 +129,62 @@ fn expand_tilde_with_home(path: &str, home: Option<&str>) -> String {
 /// process environment.  If `HOME` is unset the path is returned unchanged.
 fn expand_tilde(path: &str) -> String {
     expand_tilde_with_home(path, std::env::var("HOME").ok().as_deref())
+}
+
+// ---------------------------------------------------------------------------
+// URL / scheme detection helper
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if `path` looks like a URL or has a URI scheme prefix,
+/// meaning it should NOT be passed to `open`/`xdg-open` by the adapter.
+///
+/// Detection rules (no regex — character scanning only):
+///
+/// 1. **Contains `"://"`** — catches `http://`, `https://`, `ftp://`,
+///    `file:///`, `ssh://`, `git://`, etc.
+/// 2. **Starts with a URI scheme** — a leading run of
+///    `[A-Za-z][A-Za-z0-9+.-]*` immediately followed by `:`.
+///    POSIX local paths never start with `scheme:`.
+///    Single-char prefixes like `C:` (Windows drive letters) would match,
+///    but Windows paths are already rejected by [`AdapterError::UnsupportedOs`]
+///    before this function is consulted; on macOS/Linux single-char schemes
+///    are not used for valid local paths.
+///
+/// Examples that return `true`:
+/// - `http://example.com`, `https://x.y`, `file:///etc/hosts`,
+///   `mailto:user@example.com`, `ftp://server`
+///
+/// Examples that return `false` (local paths):
+/// - `/absolute/path`, `./relative`, `../parent`, `plain.txt`,
+///   `~/Downloads` (after or before tilde expansion)
+pub(crate) fn looks_like_url_or_scheme(path: &str) -> bool {
+    // Rule 1: contains "://"
+    if path.contains("://") {
+        return true;
+    }
+    // Rule 2: starts with [A-Za-z][A-Za-z0-9+.-]* followed by ':'
+    // Walk through the path, collecting a potential scheme prefix.
+    let mut chars = path.chars();
+    // First character must be ASCII alpha
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    // Subsequent characters: scheme chars = [A-Za-z0-9+\-.]
+    // Stop when we hit ':' (scheme end) or any other character (not a scheme).
+    for c in chars {
+        if c == ':' {
+            // We found a colon after a valid scheme prefix → treat as URI scheme.
+            return true;
+        }
+        if c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.' {
+            // Still inside a potential scheme prefix — continue.
+            continue;
+        }
+        // Any other character (e.g. '/', ' ', '\0') breaks the scheme pattern.
+        break;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +291,54 @@ pub fn render(intent: &Intent, os: Os) -> Result<CommandPlan, AdapterError> {
 }
 
 // ---------------------------------------------------------------------------
+// Adapter capability check
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if the adapter can render a command for this intent type on
+/// the given OS.
+///
+/// This is a **variant + OS based** capability check, independent of any
+/// specific instance's parameter validity.  For example,
+/// `is_renderable(&OpenFileOrFolder { .. }, MacOs)` returns `true` even though
+/// a *specific* instance with a URL path would be rejected by [`render`] with
+/// [`AdapterError::InvalidParameter`].  Capability (can the adapter produce a
+/// command at all for this intent variant?) is a different question from
+/// instance validity (does this specific parameter set pass all rendering
+/// guards?).
+///
+/// # Returns `true` for
+///
+/// The supported read-only intents on [`Os::MacOs`] and [`Os::Linux`]:
+/// - [`Intent::FindProcessUsingPort`]
+/// - [`Intent::FindLargeFiles`]
+/// - [`Intent::OpenFileOrFolder`]
+/// - [`Intent::InspectLogs`]
+/// - [`Intent::CheckSystemHealth`]
+///
+/// # Returns `false` for
+///
+/// - Intents with no command equivalent (`ExplainError`, `FixLastCommand`,
+///   `AskClarification`) — handled by the explanation/clarification layer.
+/// - Write / system intents (`InstallPackage`, `KillProcess`, `CompressFolder`,
+///   `CreateBackup`, `CreateProject`, `GitCommitChanges`, `StartService`,
+///   `StopService`, `UpdatePackages`) — not yet implemented in this slice.
+/// - [`Os::Windows`] and [`Os::Other`] — not supported for any intent.
+pub fn is_renderable(intent: &Intent, os: Os) -> bool {
+    match os {
+        Os::Windows | Os::Other => return false,
+        Os::MacOs | Os::Linux => {}
+    }
+    matches!(
+        intent,
+        Intent::FindProcessUsingPort { .. }
+            | Intent::FindLargeFiles { .. }
+            | Intent::OpenFileOrFolder { .. }
+            | Intent::InspectLogs { .. }
+            | Intent::CheckSystemHealth {}
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Per-intent render helpers
 // ---------------------------------------------------------------------------
 
@@ -266,10 +386,33 @@ fn render_find_large_files(
 }
 
 fn render_open_file_or_folder(path: &str, os: Os) -> Result<CommandPlan, AdapterError> {
+    // Reject unsupported OS first (preserves UnsupportedOs for Windows/Other
+    // even when the path string might look like a URI scheme, e.g. "C:\file").
+    match os {
+        Os::Windows | Os::Other => {
+            return Err(AdapterError::UnsupportedOs {
+                intent: "open_file_or_folder",
+                os,
+            });
+        }
+        Os::MacOs | Os::Linux => {}
+    }
     let expanded = expand_tilde(path);
+    // Reject URL-scheme / non-local paths: open/xdg-open can trigger network
+    // access and arbitrary app/handler launches. Only local file/folder paths
+    // are permitted. Check AFTER tilde expansion so that `~/x` expands first.
+    if looks_like_url_or_scheme(&expanded) {
+        return Err(AdapterError::InvalidParameter {
+            intent: "open_file_or_folder",
+            reason: "path looks like a URL or has a URI scheme; only local file/folder \
+                     paths are accepted (open/xdg-open can trigger network access and \
+                     arbitrary handler launches for URL-scheme inputs)",
+        });
+    }
     match os {
         Os::MacOs => Ok(CommandPlan::exec("open", [&expanded])),
         Os::Linux => Ok(CommandPlan::exec("xdg-open", [&expanded])),
+        // Already handled above; this arm is unreachable but required for exhaustiveness.
         Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
             intent: "open_file_or_folder",
             os,
@@ -1011,5 +1154,296 @@ mod tests {
             expand_tilde_with_home("relative/path", Some("/my/home")),
             "relative/path"
         );
+    }
+
+    // ── looks_like_url_or_scheme ──────────────────────────────────────────────
+
+    #[test]
+    fn url_detection_http_is_url() {
+        assert!(looks_like_url_or_scheme("http://example.com"));
+    }
+
+    #[test]
+    fn url_detection_https_is_url() {
+        assert!(looks_like_url_or_scheme("https://x.y/z"));
+    }
+
+    #[test]
+    fn url_detection_file_triple_slash_is_url() {
+        assert!(looks_like_url_or_scheme("file:///etc/hosts"));
+    }
+
+    #[test]
+    fn url_detection_mailto_is_url() {
+        assert!(looks_like_url_or_scheme("mailto:a@b.com"));
+    }
+
+    #[test]
+    fn url_detection_ftp_is_url() {
+        assert!(looks_like_url_or_scheme("ftp://server/path"));
+    }
+
+    #[test]
+    fn url_detection_ssh_is_url() {
+        assert!(looks_like_url_or_scheme("ssh://host"));
+    }
+
+    #[test]
+    fn url_detection_absolute_path_is_not_url() {
+        assert!(!looks_like_url_or_scheme("/Users/me/file.txt"));
+    }
+
+    #[test]
+    fn url_detection_relative_path_is_not_url() {
+        assert!(!looks_like_url_or_scheme("./notes.md"));
+    }
+
+    #[test]
+    fn url_detection_parent_relative_is_not_url() {
+        assert!(!looks_like_url_or_scheme("../foo/bar"));
+    }
+
+    #[test]
+    fn url_detection_bare_filename_is_not_url() {
+        assert!(!looks_like_url_or_scheme("plain.txt"));
+    }
+
+    #[test]
+    fn url_detection_tilde_path_is_not_url() {
+        assert!(!looks_like_url_or_scheme("~/Downloads"));
+    }
+
+    #[test]
+    fn url_detection_expanded_home_is_not_url() {
+        assert!(!looks_like_url_or_scheme("/home/alice/Downloads"));
+    }
+
+    // ── OpenFileOrFolder: URL inputs rejected ─────────────────────────────────
+
+    #[test]
+    fn open_file_url_http_rejected() {
+        let intent = Intent::OpenFileOrFolder {
+            path: "http://example.com".to_owned(),
+        };
+        let err = render(&intent, Os::MacOs).expect_err("URL must be rejected");
+        assert!(
+            matches!(
+                err,
+                AdapterError::InvalidParameter {
+                    intent: "open_file_or_folder",
+                    ..
+                }
+            ),
+            "expected InvalidParameter, got: {err}"
+        );
+    }
+
+    #[test]
+    fn open_file_url_https_rejected_linux() {
+        let intent = Intent::OpenFileOrFolder {
+            path: "https://x.y".to_owned(),
+        };
+        let err = render(&intent, Os::Linux).expect_err("URL must be rejected");
+        assert!(matches!(
+            err,
+            AdapterError::InvalidParameter {
+                intent: "open_file_or_folder",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn open_file_url_file_scheme_rejected() {
+        let intent = Intent::OpenFileOrFolder {
+            path: "file:///etc/hosts".to_owned(),
+        };
+        let err = render(&intent, Os::MacOs).expect_err("file:// URL must be rejected");
+        assert!(matches!(
+            err,
+            AdapterError::InvalidParameter {
+                intent: "open_file_or_folder",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn open_file_url_mailto_rejected() {
+        let intent = Intent::OpenFileOrFolder {
+            path: "mailto:user@example.com".to_owned(),
+        };
+        let err = render(&intent, Os::MacOs).expect_err("mailto: must be rejected");
+        assert!(matches!(
+            err,
+            AdapterError::InvalidParameter {
+                intent: "open_file_or_folder",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn open_file_local_absolute_path_ok_macos() {
+        let intent = Intent::OpenFileOrFolder {
+            path: "/Users/me/file.txt".to_owned(),
+        };
+        let plan = render(&intent, Os::MacOs).expect("local absolute path should render");
+        let step = as_exec(&plan);
+        assert_eq!(step.program, "open");
+        assert_eq!(step.args, vec!["/Users/me/file.txt"]);
+    }
+
+    #[test]
+    fn open_file_relative_path_ok_linux() {
+        let intent = Intent::OpenFileOrFolder {
+            path: "./notes".to_owned(),
+        };
+        let plan = render(&intent, Os::Linux).expect("relative path should render");
+        let step = as_exec(&plan);
+        assert_eq!(step.program, "xdg-open");
+        assert_eq!(step.args, vec!["./notes"]);
+    }
+
+    #[test]
+    fn open_file_tilde_path_ok_macos() {
+        // Test via the pure helper to avoid env mutation.
+        let expanded = expand_tilde_with_home("~/Downloads", Some("/home/testuser"));
+        // The expanded path is a local absolute path — must not look like a URL.
+        assert!(!looks_like_url_or_scheme(&expanded));
+    }
+
+    // ── AdapterError::InvalidParameter Display ────────────────────────────────
+
+    #[test]
+    fn adapter_error_invalid_parameter_display_contains_intent_and_reason() {
+        let err = AdapterError::InvalidParameter {
+            intent: "open_file_or_folder",
+            reason: "URL not allowed",
+        };
+        let s = err.to_string();
+        assert!(s.contains("open_file_or_folder"), "display: {s}");
+        assert!(s.contains("URL not allowed"), "display: {s}");
+    }
+
+    // ── is_renderable ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_renderable_find_process_macos_true() {
+        let intent = Intent::FindProcessUsingPort { port: 8080 };
+        assert!(is_renderable(&intent, Os::MacOs));
+    }
+
+    #[test]
+    fn is_renderable_find_process_linux_true() {
+        let intent = Intent::FindProcessUsingPort { port: 8080 };
+        assert!(is_renderable(&intent, Os::Linux));
+    }
+
+    #[test]
+    fn is_renderable_check_system_health_macos_true() {
+        let intent = Intent::CheckSystemHealth {};
+        assert!(is_renderable(&intent, Os::MacOs));
+    }
+
+    #[test]
+    fn is_renderable_check_system_health_linux_true() {
+        let intent = Intent::CheckSystemHealth {};
+        assert!(is_renderable(&intent, Os::Linux));
+    }
+
+    #[test]
+    fn is_renderable_open_file_or_folder_macos_true() {
+        // is_renderable is variant+OS based — returns true even though a URL
+        // instance would fail render() with InvalidParameter. Capability vs
+        // instance validity are separate questions.
+        let intent = Intent::OpenFileOrFolder {
+            path: "http://example.com".to_owned(),
+        };
+        assert!(
+            is_renderable(&intent, Os::MacOs),
+            "is_renderable must be true for the variant regardless of URL params"
+        );
+    }
+
+    #[test]
+    fn is_renderable_explain_error_false() {
+        let intent = Intent::ExplainError {
+            command: None,
+            stderr: None,
+            exit_code: None,
+        };
+        assert!(!is_renderable(&intent, Os::MacOs));
+        assert!(!is_renderable(&intent, Os::Linux));
+    }
+
+    #[test]
+    fn is_renderable_fix_last_command_false() {
+        let intent = Intent::FixLastCommand {
+            last_command: "ls".to_owned(),
+            exit_code: 1,
+            stderr: "err".to_owned(),
+        };
+        assert!(!is_renderable(&intent, Os::MacOs));
+    }
+
+    #[test]
+    fn is_renderable_ask_clarification_false() {
+        let intent = Intent::AskClarification {
+            question: "Which?".to_owned(),
+            options: None,
+        };
+        assert!(!is_renderable(&intent, Os::MacOs));
+    }
+
+    #[test]
+    fn is_renderable_install_package_false() {
+        let intent = Intent::InstallPackage {
+            name: "vim".to_owned(),
+            manager: None,
+            version: None,
+        };
+        assert!(!is_renderable(&intent, Os::MacOs));
+        assert!(!is_renderable(&intent, Os::Linux));
+    }
+
+    #[test]
+    fn is_renderable_find_process_windows_false() {
+        let intent = Intent::FindProcessUsingPort { port: 8080 };
+        assert!(!is_renderable(&intent, Os::Windows));
+    }
+
+    #[test]
+    fn is_renderable_check_system_health_windows_false() {
+        let intent = Intent::CheckSystemHealth {};
+        assert!(!is_renderable(&intent, Os::Windows));
+    }
+
+    #[test]
+    fn is_renderable_find_process_other_false() {
+        let intent = Intent::FindProcessUsingPort { port: 8080 };
+        assert!(!is_renderable(&intent, Os::Other));
+    }
+
+    #[test]
+    fn is_renderable_find_large_files_true() {
+        let intent = Intent::FindLargeFiles {
+            path: "/tmp".to_owned(),
+            min_size: None,
+            limit: None,
+        };
+        assert!(is_renderable(&intent, Os::MacOs));
+        assert!(is_renderable(&intent, Os::Linux));
+    }
+
+    #[test]
+    fn is_renderable_inspect_logs_true() {
+        let intent = Intent::InspectLogs {
+            source: None,
+            since: None,
+            filter: None,
+        };
+        assert!(is_renderable(&intent, Os::MacOs));
+        assert!(is_renderable(&intent, Os::Linux));
     }
 }
