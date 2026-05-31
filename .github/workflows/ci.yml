@@ -13,9 +13,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  ci:
-    name: build / test / fmt / clippy / deny
-    runs-on: ubuntu-latest
+  build:
+    name: build / test / fmt / clippy / doc
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +49,16 @@ jobs:
 
       - name: Build (release)
         run: cargo build --workspace --release
+
+  supply-chain:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # cargo-deny invokes `cargo metadata`, so a toolchain must be present.
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
 
       # Pinned to the same cargo-deny version verified locally, so the deny.toml
       # schema cannot be rejected by a drifted CLI (see ci-deploy-patterns).

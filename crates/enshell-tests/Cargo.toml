@@ -5,3 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+
+[dev-dependencies]
+enshell-adapters = { path = "../enshell-adapters" }
+enshell-intents = { path = "../enshell-intents" }
+enshell-os = { path = "../enshell-os" }
+enshell-policy = { path = "../enshell-policy" }
