@@ -10,14 +10,16 @@ This file is the dependency license inventory for the enShell workspace.
 
 ## Current Status
 
-**The workspace currently has no third-party dependencies.**
+The workspace now has its first third-party dependencies (Phase 1 has begun):
+`serde` and `serde_json` (direct, via `enshell-intents`), plus their transitive
+crates: `serde_core`, `serde_derive`, `itoa`, `memchr`, `zmij`, `proc-macro2`,
+`quote`, `syn`, `unicode-ident`. All are permissive (MIT / Apache-2.0 /
+Unlicense) and compatible with enShell's Apache-2.0 license. See
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for per-crate detail.
 
-enShell is at **Planning Stage (Phase 0)**. The Rust workspace skeleton uses only
-the Rust standard library (`std`). No third-party crates are listed in any
-`Cargo.toml` yet.
-
-This file will be regenerated as dependencies are added. The generated content
-will replace or supplement the placeholder text in this document.
+This inventory is maintained by hand at this early stage. The full,
+machine-generated inventory (via the commands below) and automated license
+enforcement will replace it once the CI tooling (roadmap Epic A3) is wired in.
 
 ---
 

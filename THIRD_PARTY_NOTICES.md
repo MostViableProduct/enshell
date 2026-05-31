@@ -11,13 +11,25 @@ and their licenses.
 
 ## Current Status
 
-**This repository currently bundles no third-party source dependencies.**
+Phase 1 implementation has begun, so the workspace now has its first third-party
+dependencies, introduced by `enshell-intents` for JSON (de)serialization of model
+output:
 
-The repository is at **Planning Stage (Phase 0)**. The Rust workspace skeleton
-uses only the Rust standard library (`std`). No third-party crates have been
-added to `Cargo.toml` yet.
+| Direct dependency | Used by | License |
+|---|---|---|
+| `serde` (with `derive`) | `enshell-intents` | MIT OR Apache-2.0 |
+| `serde_json` | `enshell-intents` | MIT OR Apache-2.0 |
 
-This file will be updated — and verified in CI — as dependencies are added.
+Transitive dependencies pulled in by the above (all permissive and
+Apache-2.0-compatible): `serde_core`, `serde_derive`, `itoa`, `memchr`
+(Unlicense OR MIT), `zmij` (David Tolnay's Schubfach-based double-to-string
+formatter — the successor to `ryu`, used by `serde_json`), `proc-macro2`,
+`quote`, `syn`, `unicode-ident` — each MIT OR Apache-2.0 unless noted.
+
+All current dependencies are permissive and compatible with enShell's Apache-2.0
+license. **License identifiers above are asserted from known upstream metadata,
+not yet tool-verified** — they will be machine-generated and enforced in CI
+(`cargo about` / `cargo deny`, see below) before any release.
 
 ---
 
