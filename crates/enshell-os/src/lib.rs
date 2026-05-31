@@ -311,8 +311,38 @@ fn execute_step(step: &ExecStep) -> Result<ExecOutput, ExecError> {
     }
 }
 
+/// Kill and wait every child in `children`, ignoring errors (best-effort cleanup).
+fn kill_and_reap(children: &mut [std::process::Child]) {
+    for child in children.iter_mut() {
+        // Best-effort: ignore kill errors (process may have already exited).
+        let _ = child.kill();
+    }
+    for child in children.iter_mut() {
+        let _ = child.wait();
+    }
+}
+
 /// Wire `steps[i].stdout → steps[i+1].stdin` using OS pipes; return the last
 /// stage's captured output.
+///
+/// # Lifecycle
+///
+/// - Every spawned child handle is kept until all stages have been spawned and
+///   the last stage has finished, then each intermediate child is waited/reaped
+///   in order. This ensures no zombie processes are left behind and that all
+///   exit statuses are checked.
+///
+/// - Intermediate stages have their **stderr discarded** (`Stdio::null()`). This
+///   prevents an undrained piped-stderr buffer from blocking a chatty upstream
+///   stage. A future improvement could thread-drain intermediate stderr for
+///   diagnostics.
+///
+/// - If spawning stage `i` fails, all already-spawned children are killed and
+///   waited before the error is returned, preventing leaks.
+///
+/// - If **any** stage exits non-zero, the function returns
+///   [`ExecError::NonZeroExit`]. The failing stage's exit code is used; the
+///   last stage's captured stderr is included in the error when available.
 fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
     if steps.is_empty() {
         return Err(ExecError::Io(io::Error::new(
@@ -326,93 +356,171 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
         return execute_step(&steps[0]);
     }
 
-    // Spawn the first process with piped stdout.
+    // ── Phase 1: spawn all stages ─────────────────────────────────────────────
+    //
+    // We keep every child handle so we can wait/reap them all after the last
+    // stage finishes. `spawned` accumulates the intermediate children (indices
+    // 0..n-2); the last child is handled separately via `wait_with_output`.
+
+    // Spawn the first process with piped stdout; stderr discarded (intermediate).
     let first = &steps[0];
     let mut prev_child = Command::new(&first.program)
         .args(&first.args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        // Intermediate stderr discarded to prevent undrained-pipe deadlock.
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|e| map_spawn_error(&first.program, e))?;
 
-    // Spawn intermediate processes, each reading from the previous child's stdout.
+    // Accumulate all intermediate children so we can reap them later.
+    let mut intermediate_children: Vec<std::process::Child> = Vec::new();
+
+    // Spawn intermediate stages (indices 1..n-2), each reading from the
+    // previous child's stdout.
     for step in &steps[1..steps.len() - 1] {
-        let stdin_pipe = prev_child
-            .stdout
-            .take()
-            .ok_or_else(|| {
-                io::Error::new(
+        let stdin_pipe = match prev_child.stdout.take() {
+            Some(pipe) => Stdio::from(pipe),
+            None => {
+                // Cannot take stdout — kill everything already spawned.
+                intermediate_children.push(prev_child);
+                kill_and_reap(&mut intermediate_children);
+                return Err(ExecError::Io(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "could not take stdout from child",
-                )
-            })
-            .map(Stdio::from)
-            .map_err(ExecError::Io)?;
+                )));
+            }
+        };
 
         let child = Command::new(&step.program)
             .args(&step.args)
             .stdin(stdin_pipe)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| map_spawn_error(&step.program, e))?;
+            // Intermediate stderr discarded to prevent undrained-pipe deadlock.
+            .stderr(Stdio::null())
+            .spawn();
 
-        // We no longer need the previous child's handle; let it finish.
-        // Drop it so its write-end of the pipe is closed, signalling EOF to
-        // the next child when the pipe drains.
-        drop(prev_child);
-        prev_child = child;
+        match child {
+            Ok(c) => {
+                intermediate_children.push(prev_child);
+                prev_child = c;
+            }
+            Err(e) => {
+                // Spawn failed: reap all already-spawned children before returning.
+                intermediate_children.push(prev_child);
+                kill_and_reap(&mut intermediate_children);
+                return Err(map_spawn_error(&step.program, e));
+            }
+        }
     }
 
-    // Spawn the last process; capture its stdout so we can return it.
-    // `steps` is guaranteed non-empty (checked at function entry), but we handle
-    // the empty case without panicking rather than relying on `.expect()`.
+    // `steps` is guaranteed to have len >= 2 here (checked above), so
+    // `steps.last()` is always `Some`.
     let last = match steps.last() {
         Some(step) => step,
         None => {
+            kill_and_reap(&mut intermediate_children);
             return Err(ExecError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "pipeline has no steps",
-            )))
+            )));
         }
     };
-    let stdin_pipe = prev_child
-        .stdout
-        .take()
-        .ok_or_else(|| {
-            io::Error::new(
+
+    let stdin_pipe = match prev_child.stdout.take() {
+        Some(pipe) => Stdio::from(pipe),
+        None => {
+            intermediate_children.push(prev_child);
+            kill_and_reap(&mut intermediate_children);
+            return Err(ExecError::Io(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "could not take stdout from child",
-            )
-        })
-        .map(Stdio::from)
-        .map_err(ExecError::Io)?;
+            )));
+        }
+    };
+    // Push the second-to-last intermediate child now that we've taken its stdout.
+    intermediate_children.push(prev_child);
 
+    // Spawn the last stage with both stdout and stderr captured for the caller.
     let last_child = Command::new(&last.program)
         .args(&last.args)
         .stdin(stdin_pipe)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| map_spawn_error(&last.program, e))?;
+        .spawn();
 
-    // Wait for the last child to finish, capturing its output.
-    let output = last_child.wait_with_output().map_err(ExecError::Io)?;
+    let last_child = match last_child {
+        Ok(c) => c,
+        Err(e) => {
+            kill_and_reap(&mut intermediate_children);
+            return Err(map_spawn_error(&last.program, e));
+        }
+    };
 
-    let exit_code = output.status.code();
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    // ── Phase 2: wait for the last stage, then reap intermediates ─────────────
+    //
+    // We wait on the last child first (collecting its stdout/stderr), then wait
+    // on each intermediate child in order to reap them and check exit codes.
 
-    if output.status.success() {
+    let last_output = last_child.wait_with_output().map_err(|e| {
+        kill_and_reap(&mut intermediate_children);
+        ExecError::Io(e)
+    })?;
+
+    let last_exit_code = last_output.status.code();
+    let last_stdout = String::from_utf8_lossy(&last_output.stdout).into_owned();
+    let last_stderr = String::from_utf8_lossy(&last_output.stderr).into_owned();
+
+    // ── Phase 3: reap intermediate children, check each exit status ───────────
+    //
+    // Wait on each intermediate child (in spawn order) and collect any failure.
+    // We use the FIRST non-zero exit we encounter as the authoritative error.
+    let mut first_failure: Option<ExecError> = None;
+
+    for (idx, child) in intermediate_children.iter_mut().enumerate() {
+        match child.wait() {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                if first_failure.is_none() {
+                    // Use the failing stage's exit code; include last stage's
+                    // stderr if available (most useful context for the caller).
+                    let msg = if last_stderr.is_empty() {
+                        format!("pipeline stage {idx} exited with non-zero status")
+                    } else {
+                        last_stderr.clone()
+                    };
+                    first_failure = Some(ExecError::NonZeroExit {
+                        code: status.code(),
+                        stderr: msg,
+                    });
+                }
+            }
+            Err(_) => {
+                // wait() itself failed (rare); record only if no earlier failure.
+                if first_failure.is_none() {
+                    first_failure = Some(ExecError::Io(io::Error::other(format!(
+                        "failed to wait on pipeline stage {idx}"
+                    ))));
+                }
+            }
+        }
+    }
+
+    // If an intermediate stage failed, report that (takes priority over last stage).
+    if let Some(err) = first_failure {
+        return Err(err);
+    }
+
+    // Now check the last stage.
+    if last_output.status.success() {
         Ok(ExecOutput {
-            stdout,
-            stderr,
-            exit_code,
+            stdout: last_stdout,
+            stderr: last_stderr,
+            exit_code: last_exit_code,
         })
     } else {
         Err(ExecError::NonZeroExit {
-            code: exit_code,
-            stderr,
+            code: last_exit_code,
+            stderr: last_stderr,
         })
     }
 }
@@ -664,6 +772,80 @@ mod tests {
             ]);
             let output = execute(&plan).expect("3-stage pipeline should succeed");
             assert_eq!(output.stdout, "a\n");
+        }
+
+        /// `false | true` → upstream failure detected; must NOT report success.
+        ///
+        /// A correct pipeline waits and checks all stages. `true` exits 0 but
+        /// `false` exits 1, so the pipeline must return `NonZeroExit`.
+        #[test]
+        fn test_pipeline_upstream_false_is_detected() {
+            let plan = CommandPlan::pipeline(vec![
+                ExecStep::new("false", [] as [&str; 0]),
+                ExecStep::new("true", [] as [&str; 0]),
+            ]);
+            let result = execute(&plan);
+            assert!(
+                matches!(result, Err(ExecError::NonZeroExit { .. })),
+                "expected NonZeroExit from upstream `false`, got {result:?}"
+            );
+        }
+
+        /// `true | false` → last stage fails; must return `NonZeroExit`.
+        #[test]
+        fn test_pipeline_last_stage_false_is_detected() {
+            let plan = CommandPlan::pipeline(vec![
+                ExecStep::new("true", [] as [&str; 0]),
+                ExecStep::new("false", [] as [&str; 0]),
+            ]);
+            let result = execute(&plan);
+            assert!(
+                matches!(result, Err(ExecError::NonZeroExit { .. })),
+                "expected NonZeroExit from last-stage `false`, got {result:?}"
+            );
+        }
+
+        /// `echo hi | cat` → success, stdout "hi\n".
+        #[test]
+        fn test_pipeline_echo_hi_cat() {
+            let plan = CommandPlan::pipeline(vec![
+                ExecStep::new("echo", ["hi"]),
+                ExecStep::new("cat", [] as [&str; 0]),
+            ]);
+            let output = execute(&plan).expect("echo hi | cat should succeed");
+            assert_eq!(output.stdout, "hi\n");
+            assert_eq!(output.exit_code, Some(0));
+        }
+
+        /// `printf "c\na\nb\n" | sort | head -n 2` → "a\nb\n" (3-stage happy path).
+        #[test]
+        fn test_pipeline_three_stage_sort_head() {
+            let plan = CommandPlan::pipeline(vec![
+                ExecStep::new("printf", ["c\na\nb\n"]),
+                ExecStep::new("sort", [] as [&str; 0]),
+                ExecStep::new("head", ["-n", "2"]),
+            ]);
+            let output = execute(&plan).expect("3-stage pipeline should succeed");
+            assert_eq!(output.stdout, "a\nb\n");
+            assert_eq!(output.exit_code, Some(0));
+        }
+
+        /// `echo hi | <bogus_program> | cat` → `ProgramNotFound`, no panic/hang.
+        ///
+        /// Verifies that a spawn failure mid-pipeline cleans up already-spawned
+        /// children instead of leaking them.
+        #[test]
+        fn test_pipeline_bad_intermediate_program() {
+            let plan = CommandPlan::pipeline(vec![
+                ExecStep::new("echo", ["hi"]),
+                ExecStep::new("__enshell_nonexistent_xyz_middle__", [] as [&str; 0]),
+                ExecStep::new("cat", [] as [&str; 0]),
+            ]);
+            let result = execute(&plan);
+            assert!(
+                matches!(result, Err(ExecError::ProgramNotFound(_))),
+                "expected ProgramNotFound for bad intermediate program, got {result:?}"
+            );
         }
 
         // ── Sequence ──────────────────────────────────────────────────────────
