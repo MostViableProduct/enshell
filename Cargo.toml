@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/enshell-cli",
+    "crates/enshell-core",
+    "crates/enshell-policy",
+    "crates/enshell-model",
+    "crates/enshell-llama",
+    "crates/enshell-intents",
+    "crates/enshell-adapters",
+    "crates/enshell-shell",
+    "crates/enshell-os",
+    "crates/enshell-memory",
+    "crates/enshell-telemetry",
+    "crates/enshell-tests",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/MostViableProduct/enshell"
+rust-version = "1.92"
