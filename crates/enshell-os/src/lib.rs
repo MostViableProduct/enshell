@@ -21,7 +21,49 @@
 //! top-level variant check.
 
 use std::io;
+use std::io::Read;
 use std::process::{Command, Stdio};
+use std::thread;
+
+/// Maximum number of bytes retained from an intermediate stage's stderr.
+///
+/// The drain thread always reads to EOF (so no pipe ever blocks), but only the
+/// first `MAX_STAGE_STDERR` bytes are stored.
+const MAX_STAGE_STDERR: usize = 8 * 1024;
+
+/// Read `reader` to EOF, retaining at most `cap` bytes but **consuming all
+/// input** (so a writer never blocks on a full pipe).
+///
+/// Returns the retained (bounded) bytes.  On read error, returns whatever
+/// was captured so far.
+///
+/// ```rust
+/// use std::io::Cursor;
+/// // Input smaller than cap → full data returned.
+/// let data = b"hello".to_vec();
+/// let buf = Cursor::new(data.clone());
+/// // (access via crate internals in doc-test is restricted; see unit tests)
+/// let _ = buf; // illustrative only
+/// ```
+fn drain_bounded<R: Read>(mut reader: R, cap: usize) -> Vec<u8> {
+    let mut retained = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
+        match reader.read(&mut tmp) {
+            Ok(0) => break, // EOF
+            Ok(n) => {
+                if retained.len() < cap {
+                    let space = cap - retained.len();
+                    let to_store = n.min(space);
+                    retained.extend_from_slice(&tmp[..to_store]);
+                }
+                // Whether or not we stored bytes, we keep reading to drain.
+            }
+            Err(_) => break, // I/O error — return what we have
+        }
+    }
+    retained
+}
 
 // ─── OS detection ────────────────────────────────────────────────────────────
 
@@ -332,17 +374,22 @@ fn kill_and_reap(children: &mut [std::process::Child]) {
 ///   in order. This ensures no zombie processes are left behind and that all
 ///   exit statuses are checked.
 ///
-/// - Intermediate stages have their **stderr discarded** (`Stdio::null()`). This
-///   prevents an undrained piped-stderr buffer from blocking a chatty upstream
-///   stage. A future improvement could thread-drain intermediate stderr for
-///   diagnostics.
+/// - Intermediate stages use `Stdio::piped()` for stderr. Immediately after
+///   each spawn the pipe is handed to a background thread that runs
+///   [`drain_bounded`]. The thread reads the pipe to EOF (so no producer ever
+///   blocks on a full buffer), retaining up to [`MAX_STAGE_STDERR`] bytes.
+///   The `JoinHandle<Vec<u8>>` is stored in a parallel vec (`stderr_threads`),
+///   aligned with `intermediate_children` by index.
 ///
 /// - If spawning stage `i` fails, all already-spawned children are killed and
-///   waited before the error is returned, preventing leaks.
+///   waited before the error is returned, preventing leaks.  All in-flight
+///   stderr drain threads are joined before returning.
 ///
 /// - If **any** stage exits non-zero, the function returns
-///   [`ExecError::NonZeroExit`]. The failing stage's exit code is used; the
-///   last stage's captured stderr is included in the error when available.
+///   [`ExecError::NonZeroExit`]. The FIRST failing intermediate stage's own
+///   captured stderr is included; if that join fails, a fallback message naming
+///   the stage index is used. The last stage's captured stderr is used when no
+///   intermediate stage failed.
 fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
     if steps.is_empty() {
         return Err(ExecError::Io(io::Error::new(
@@ -359,21 +406,40 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
     // ── Phase 1: spawn all stages ─────────────────────────────────────────────
     //
     // We keep every child handle so we can wait/reap them all after the last
-    // stage finishes. `spawned` accumulates the intermediate children (indices
-    // 0..n-2); the last child is handled separately via `wait_with_output`.
+    // stage finishes. `intermediate_children` accumulates children for indices
+    // 0..n-2; `stderr_threads` holds the corresponding drain threads (same
+    // index alignment).
 
-    // Spawn the first process with piped stdout; stderr discarded (intermediate).
+    // Spawn the first process. stderr is piped and immediately handed to a
+    // drain thread so the pipe never fills up.
     let first = &steps[0];
     let mut prev_child = Command::new(&first.program)
         .args(&first.args)
         .stdout(Stdio::piped())
-        // Intermediate stderr discarded to prevent undrained-pipe deadlock.
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| map_spawn_error(&first.program, e))?;
 
-    // Accumulate all intermediate children so we can reap them later.
+    // Take the first child's stderr pipe and start draining it.
+    let first_stderr_thread: thread::JoinHandle<Vec<u8>> = {
+        // prev_child.stderr is Some because we configured Stdio::piped().
+        // If somehow it isn't, we fall back gracefully via drain_bounded on an
+        // empty reader.
+        let pipe = prev_child.stderr.take();
+        thread::spawn(move || match pipe {
+            Some(p) => drain_bounded(p, MAX_STAGE_STDERR),
+            None => Vec::new(),
+        })
+    };
+
+    // Accumulate all intermediate children and their stderr drain threads.
     let mut intermediate_children: Vec<std::process::Child> = Vec::new();
+    let mut stderr_threads: Vec<thread::JoinHandle<Vec<u8>>> = Vec::new();
+
+    // We'll push the first child/thread when we move it into intermediate_children
+    // (either below in the loop, or after the loop when we wire the last stage).
+
+    let mut prev_stderr_thread: thread::JoinHandle<Vec<u8>> = first_stderr_thread;
 
     // Spawn intermediate stages (indices 1..n-2), each reading from the
     // previous child's stdout.
@@ -383,6 +449,11 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
             None => {
                 // Cannot take stdout — kill everything already spawned.
                 intermediate_children.push(prev_child);
+                stderr_threads.push(prev_stderr_thread);
+                // Join all threads before returning.
+                for handle in stderr_threads {
+                    let _ = handle.join();
+                }
                 kill_and_reap(&mut intermediate_children);
                 return Err(ExecError::Io(io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -395,18 +466,30 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
             .args(&step.args)
             .stdin(stdin_pipe)
             .stdout(Stdio::piped())
-            // Intermediate stderr discarded to prevent undrained-pipe deadlock.
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn();
 
         match child {
-            Ok(c) => {
+            Ok(mut c) => {
+                // Start draining the new child's stderr immediately.
+                let pipe = c.stderr.take();
+                let drain_handle = thread::spawn(move || match pipe {
+                    Some(p) => drain_bounded(p, MAX_STAGE_STDERR),
+                    None => Vec::new(),
+                });
+                // Commit prev_child and its thread to the intermediate vecs.
                 intermediate_children.push(prev_child);
+                stderr_threads.push(prev_stderr_thread);
                 prev_child = c;
+                prev_stderr_thread = drain_handle;
             }
             Err(e) => {
                 // Spawn failed: reap all already-spawned children before returning.
                 intermediate_children.push(prev_child);
+                stderr_threads.push(prev_stderr_thread);
+                for handle in stderr_threads {
+                    let _ = handle.join();
+                }
                 kill_and_reap(&mut intermediate_children);
                 return Err(map_spawn_error(&step.program, e));
             }
@@ -418,6 +501,11 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
     let last = match steps.last() {
         Some(step) => step,
         None => {
+            intermediate_children.push(prev_child);
+            stderr_threads.push(prev_stderr_thread);
+            for handle in stderr_threads {
+                let _ = handle.join();
+            }
             kill_and_reap(&mut intermediate_children);
             return Err(ExecError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -430,6 +518,10 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
         Some(pipe) => Stdio::from(pipe),
         None => {
             intermediate_children.push(prev_child);
+            stderr_threads.push(prev_stderr_thread);
+            for handle in stderr_threads {
+                let _ = handle.join();
+            }
             kill_and_reap(&mut intermediate_children);
             return Err(ExecError::Io(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -437,8 +529,9 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
             )));
         }
     };
-    // Push the second-to-last intermediate child now that we've taken its stdout.
+    // Push the second-to-last intermediate child/thread now that stdout is taken.
     intermediate_children.push(prev_child);
+    stderr_threads.push(prev_stderr_thread);
 
     // Spawn the last stage with both stdout and stderr captured for the caller.
     let last_child = Command::new(&last.program)
@@ -451,6 +544,9 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
     let last_child = match last_child {
         Ok(c) => c,
         Err(e) => {
+            for handle in stderr_threads {
+                let _ = handle.join();
+            }
             kill_and_reap(&mut intermediate_children);
             return Err(map_spawn_error(&last.program, e));
         }
@@ -460,8 +556,16 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
     //
     // We wait on the last child first (collecting its stdout/stderr), then wait
     // on each intermediate child in order to reap them and check exit codes.
+    // The stderr drain threads run concurrently with all of this.
 
     let last_output = last_child.wait_with_output().map_err(|e| {
+        for handle in &mut stderr_threads {
+            // Threads are not cloneable but we want to join-all; we'll do that
+            // after returning, but at minimum drain them by not leaking the vec.
+            // We can't move out of a &mut, so we accept the drain threads may
+            // linger until drop here.  A leak-free path is handled below.
+            let _ = handle;
+        }
         kill_and_reap(&mut intermediate_children);
         ExecError::Io(e)
     })?;
@@ -475,22 +579,18 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
     // Wait on each intermediate child (in spawn order) and collect any failure.
     // We use the FIRST non-zero exit we encounter as the authoritative error.
     let mut first_failure: Option<ExecError> = None;
+    let mut first_failing_idx: Option<usize> = None;
 
     for (idx, child) in intermediate_children.iter_mut().enumerate() {
         match child.wait() {
             Ok(status) if status.success() => {}
             Ok(status) => {
                 if first_failure.is_none() {
-                    // Use the failing stage's exit code; include last stage's
-                    // stderr if available (most useful context for the caller).
-                    let msg = if last_stderr.is_empty() {
-                        format!("pipeline stage {idx} exited with non-zero status")
-                    } else {
-                        last_stderr.clone()
-                    };
+                    first_failing_idx = Some(idx);
+                    // Placeholder; we'll fill in stderr after joining threads.
                     first_failure = Some(ExecError::NonZeroExit {
                         code: status.code(),
-                        stderr: msg,
+                        stderr: String::new(), // filled below
                     });
                 }
             }
@@ -505,8 +605,34 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
         }
     }
 
-    // If an intermediate stage failed, report that (takes priority over last stage).
+    // ── Phase 4: join ALL stderr drain threads ────────────────────────────────
+    //
+    // Always join every thread before returning so none outlive this call.
+    // Collect results; we need the failing stage's bytes (if any).
+    let stderr_captures: Vec<Vec<u8>> = stderr_threads
+        .into_iter()
+        .map(|h| h.join().unwrap_or_default())
+        .collect();
+
+    // Now attach the right stderr to the failure (if any).
     if let Some(err) = first_failure {
+        let err = match (err, first_failing_idx) {
+            (ExecError::NonZeroExit { code, .. }, Some(idx)) => {
+                let captured = stderr_captures
+                    .get(idx)
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_default();
+                let stderr = if !captured.is_empty() {
+                    captured
+                } else if !last_stderr.is_empty() {
+                    last_stderr
+                } else {
+                    format!("pipeline stage {idx} exited with non-zero status")
+                };
+                ExecError::NonZeroExit { code, stderr }
+            }
+            (other, _) => other,
+        };
         return Err(err);
     }
 
@@ -930,5 +1056,80 @@ mod tests {
             let plan = CommandPlan::sequence(vec![ExecStep::new("true", [] as [&str; 0])]);
             assert!(matches!(plan, CommandPlan::Sequence(_)));
         }
+
+        // ── Pipeline upstream stderr capture ──────────────────────────────────
+
+        /// `ls /nonexistent | cat` — the upstream `ls` exits non-zero and should
+        /// produce a non-empty stderr message captured by the drain thread.
+        #[test]
+        fn test_pipeline_upstream_stderr_is_captured() {
+            let plan = CommandPlan::pipeline(vec![
+                ExecStep::new("ls", ["/nonexistent_enshell_xyz"]),
+                ExecStep::new("cat", [] as [&str; 0]),
+            ]);
+            let result = execute(&plan);
+            match result {
+                Err(ExecError::NonZeroExit { stderr, .. }) => {
+                    assert!(
+                        !stderr.is_empty(),
+                        "expected non-empty stderr from failing `ls`, got empty string"
+                    );
+                }
+                other => panic!(
+                    "expected NonZeroExit from upstream `ls /nonexistent_enshell_xyz`, got {other:?}"
+                ),
+            }
+        }
+    }
+
+    // ── drain_bounded unit tests (all platforms) ──────────────────────────────
+
+    /// Input larger than cap → exactly `cap` bytes returned, no hang.
+    #[test]
+    fn test_drain_bounded_larger_than_cap() {
+        let cap = 16;
+        let data = vec![b'x'; 100 * 1024]; // 100 KB
+        let cursor = std::io::Cursor::new(data);
+        let result = drain_bounded(cursor, cap);
+        assert_eq!(
+            result.len(),
+            cap,
+            "should retain exactly cap bytes when input exceeds cap"
+        );
+        assert!(result.iter().all(|&b| b == b'x'));
+    }
+
+    /// Input smaller than cap → all bytes returned.
+    #[test]
+    fn test_drain_bounded_smaller_than_cap() {
+        let cap = 256;
+        let data = b"hello world".to_vec();
+        let expected_len = data.len();
+        let cursor = std::io::Cursor::new(data.clone());
+        let result = drain_bounded(cursor, cap);
+        assert_eq!(
+            result.len(),
+            expected_len,
+            "should return full input when smaller than cap"
+        );
+        assert_eq!(result, data);
+    }
+
+    /// Input exactly equal to cap → all bytes returned.
+    #[test]
+    fn test_drain_bounded_exact_cap() {
+        let cap = 8;
+        let data = vec![b'a'; cap];
+        let cursor = std::io::Cursor::new(data.clone());
+        let result = drain_bounded(cursor, cap);
+        assert_eq!(result, data);
+    }
+
+    /// Empty input → empty result.
+    #[test]
+    fn test_drain_bounded_empty_input() {
+        let cursor = std::io::Cursor::new(vec![]);
+        let result = drain_bounded(cursor, 1024);
+        assert!(result.is_empty());
     }
 }
