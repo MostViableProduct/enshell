@@ -21,15 +21,22 @@ output:
 | `serde_json` | `enshell-intents` | MIT OR Apache-2.0 |
 
 Transitive dependencies pulled in by the above (all permissive and
-Apache-2.0-compatible): `serde_core`, `serde_derive`, `itoa`, `memchr`
-(Unlicense OR MIT), `zmij` (David Tolnay's Schubfach-based double-to-string
-formatter — the successor to `ryu`, used by `serde_json`), `proc-macro2`,
-`quote`, `syn`, `unicode-ident` — each MIT OR Apache-2.0 unless noted.
+Apache-2.0-compatible):
 
-All current dependencies are permissive and compatible with enShell's Apache-2.0
-license. **License identifiers above are asserted from known upstream metadata,
-not yet tool-verified** — they will be machine-generated and enforced in CI
-(`cargo about` / `cargo deny`, see below) before any release.
+- `serde_core`, `serde_derive`, `itoa`, `proc-macro2`, `quote`, `syn` — MIT OR Apache-2.0
+- `memchr` — Unlicense OR MIT
+- `zmij` (David Tolnay's Schubfach-based double-to-string formatter — the
+  successor to `ryu`, used by `serde_json`) — **MIT**
+- `unicode-ident` — (MIT OR Apache-2.0) AND **Unicode-3.0**
+
+The complete set of licenses present in the tree is therefore: **Apache-2.0,
+MIT, Unicode-3.0, Unlicense**.
+
+These identifiers are **verified by `cargo deny check`** against the allowlist in
+[`deny.toml`](deny.toml) (which permits exactly those four licenses), and the
+check runs in CI on every push and pull request (`.github/workflows/ci.yml`). A
+machine-generated SBOM / notice file (`cargo about`, `cargo cyclonedx`) will be
+added to the release pipeline as described below.
 
 ---
 

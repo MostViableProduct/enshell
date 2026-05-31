@@ -13,13 +13,17 @@ This file is the dependency license inventory for the enShell workspace.
 The workspace now has its first third-party dependencies (Phase 1 has begun):
 `serde` and `serde_json` (direct, via `enshell-intents`), plus their transitive
 crates: `serde_core`, `serde_derive`, `itoa`, `memchr`, `zmij`, `proc-macro2`,
-`quote`, `syn`, `unicode-ident`. All are permissive (MIT / Apache-2.0 /
-Unlicense) and compatible with enShell's Apache-2.0 license. See
+`quote`, `syn`, `unicode-ident`. The licenses present in the tree are
+**Apache-2.0, MIT, Unicode-3.0, Unlicense** — all permissive and compatible with
+enShell's Apache-2.0 license. See
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for per-crate detail.
 
-This inventory is maintained by hand at this early stage. The full,
-machine-generated inventory (via the commands below) and automated license
-enforcement will replace it once the CI tooling (roadmap Epic A3) is wired in.
+**License enforcement is now live:** [`deny.toml`](deny.toml) defines a tight
+allowlist (exactly those four licenses), and `cargo deny check` runs in CI on
+every push and pull request (`.github/workflows/ci.yml`). A dependency with any
+other license fails CI until it is reviewed and explicitly allowed. The
+hand-maintained list above will be supplemented by a machine-generated SBOM /
+notice file (`cargo about`, `cargo cyclonedx`) in the release pipeline.
 
 ---
 
