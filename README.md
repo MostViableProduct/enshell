@@ -16,9 +16,11 @@ enshell "why did the last command fail?"
 
 ## Status
 
-**Planning (Phase 0).** This repository currently contains the project's planning
-documentation only — there is **no runnable code yet**. The CLI, crates, and
-behaviors described here are a design, not a shipped product.
+**Planning (Phase 0).** The repository contains the planning documentation,
+governance files, and a **compiling Rust workspace skeleton** — the `enshell-*`
+crates are stubs that build (`cargo build`) but have **no functional behavior
+yet**. The CLI, crates, and behaviors described here are a design, not a shipped
+product.
 
 ## How it works (design)
 
