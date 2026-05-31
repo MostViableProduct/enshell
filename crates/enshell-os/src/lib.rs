@@ -364,6 +364,21 @@ fn kill_and_reap(children: &mut [std::process::Child]) {
     }
 }
 
+/// Abort a partially-spawned pipeline: kill+reap all children FIRST (closing
+/// their stderr so the drain threads hit EOF), THEN join the drain threads.
+///
+/// Doing it in this order avoids a hang where a join waits on a drain thread
+/// that is blocked reading a still-running child's stderr.
+fn abort_pipeline(
+    mut children: Vec<std::process::Child>,
+    stderr_threads: Vec<thread::JoinHandle<Vec<u8>>>,
+) {
+    kill_and_reap(&mut children);
+    for handle in stderr_threads {
+        let _ = handle.join();
+    }
+}
+
 /// Wire `steps[i].stdout → steps[i+1].stdin` using OS pipes; return the last
 /// stage's captured output.
 ///
@@ -450,11 +465,7 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
                 // Cannot take stdout — kill everything already spawned.
                 intermediate_children.push(prev_child);
                 stderr_threads.push(prev_stderr_thread);
-                // Join all threads before returning.
-                for handle in stderr_threads {
-                    let _ = handle.join();
-                }
-                kill_and_reap(&mut intermediate_children);
+                abort_pipeline(intermediate_children, stderr_threads);
                 return Err(ExecError::Io(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "could not take stdout from child",
@@ -487,10 +498,7 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
                 // Spawn failed: reap all already-spawned children before returning.
                 intermediate_children.push(prev_child);
                 stderr_threads.push(prev_stderr_thread);
-                for handle in stderr_threads {
-                    let _ = handle.join();
-                }
-                kill_and_reap(&mut intermediate_children);
+                abort_pipeline(intermediate_children, stderr_threads);
                 return Err(map_spawn_error(&step.program, e));
             }
         }
@@ -503,10 +511,7 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
         None => {
             intermediate_children.push(prev_child);
             stderr_threads.push(prev_stderr_thread);
-            for handle in stderr_threads {
-                let _ = handle.join();
-            }
-            kill_and_reap(&mut intermediate_children);
+            abort_pipeline(intermediate_children, stderr_threads);
             return Err(ExecError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "pipeline has no steps",
@@ -519,10 +524,7 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
         None => {
             intermediate_children.push(prev_child);
             stderr_threads.push(prev_stderr_thread);
-            for handle in stderr_threads {
-                let _ = handle.join();
-            }
-            kill_and_reap(&mut intermediate_children);
+            abort_pipeline(intermediate_children, stderr_threads);
             return Err(ExecError::Io(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "could not take stdout from child",
@@ -544,10 +546,7 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
     let last_child = match last_child {
         Ok(c) => c,
         Err(e) => {
-            for handle in stderr_threads {
-                let _ = handle.join();
-            }
-            kill_and_reap(&mut intermediate_children);
+            abort_pipeline(intermediate_children, stderr_threads);
             return Err(map_spawn_error(&last.program, e));
         }
     };
@@ -1079,6 +1078,43 @@ mod tests {
                     "expected NonZeroExit from upstream `ls /nonexistent_enshell_xyz`, got {other:?}"
                 ),
             }
+        }
+
+        /// `sleep 5 | __missing__ | cat` — spawn failure mid-pipeline must return
+        /// promptly with `ProgramNotFound`, NOT hang.
+        ///
+        /// Regression test for the cleanup-order bug: if children are killed AFTER
+        /// drain threads are joined, the join blocks on `sleep 5`'s open stderr pipe
+        /// (which never reaches EOF until the child is killed), causing a deadlock.
+        ///
+        /// The correct fix (`abort_pipeline`) kills+reaps children first, which
+        /// closes their stderr pipes and causes drain threads to see EOF promptly.
+        /// With the fix the call completes in milliseconds; the 5s timeout guards
+        /// against a regression hanging CI.
+        #[test]
+        fn test_pipeline_spawn_failure_does_not_hang() {
+            use std::sync::mpsc;
+            use std::time::Duration;
+
+            let plan = CommandPlan::pipeline(vec![
+                ExecStep::new("sleep", ["5"]),
+                ExecStep::new("__enshell_missing_program__", [] as [&str; 0]),
+                ExecStep::new("cat", [] as [&str; 0]),
+            ]);
+
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(execute(&plan));
+            });
+
+            let result = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("execute() hung on pipeline spawn failure — cleanup-order regression");
+
+            assert!(
+                matches!(result, Err(ExecError::ProgramNotFound(_))),
+                "expected ProgramNotFound, got {result:?}"
+            );
         }
     }
 
