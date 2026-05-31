@@ -7,7 +7,10 @@
 //!   the model's `"intent"` + `"parameters"` JSON shape.
 //! - [`ProposedAction`]: wraps an intent with model advisory metadata (risk hint,
 //!   explanation, confidence, requires_confirmation).
-//! - [`parse_model_output`]: entry-point to parse model JSON into a [`ProposedAction`].
+//! - [`parse_model_output`]: entry-point to parse **and validate** model JSON into a
+//!   [`ProposedAction`]. Unknown top-level and parameter fields are rejected.
+//! - [`parse_model_output_unchecked`]: structural deserialization only — no domain
+//!   validation, intended for internal or test use.
 //! - [`IntentError`]: typed errors for parse/validation failures.
 //! - [`SCHEMA_VERSION`]: the catalog version; increment on breaking changes.
 //!
@@ -17,6 +20,7 @@
 //! Authoritative risk classification is the responsibility of `enshell-policy`.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fmt;
 
 /// Schema version for the intent catalog. Increment on breaking changes.
@@ -332,18 +336,353 @@ impl ProposedAction {
 }
 
 // ---------------------------------------------------------------------------
-// Entry point
+// Strict envelope for two-stage parsing (rejects unknown top-level fields)
 // ---------------------------------------------------------------------------
 
-/// Parse a JSON string produced by the model into a [`ProposedAction`].
+/// Internal envelope used in stage-1 of strict parsing.
 ///
-/// Returns [`IntentError::MalformedJson`] for structurally invalid JSON or an
-/// unknown `"intent"` name. Does NOT automatically call `validate()` — the
-/// caller should call [`ProposedAction::validate`] after parsing if they want
-/// parameter-level checks.
+/// `#[serde(deny_unknown_fields)]` here rejects any top-level key that is not
+/// one of the five known metadata fields plus `intent` and `parameters`. This is
+/// compatible because we are NOT using `#[serde(flatten)]` in this struct.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictEnvelope {
+    intent: String,
+    #[serde(default)]
+    parameters: Value,
+    #[serde(default)]
+    risk: Option<RiskHint>,
+    #[serde(default = "default_true")]
+    requires_confirmation: bool,
+    explanation: String,
+    confidence: f32,
+}
+
+// ---------------------------------------------------------------------------
+// Per-variant parameter structs for strict parameter deserialization
+// ---------------------------------------------------------------------------
+// Each struct mirrors the fields of the corresponding Intent variant and uses
+// `#[serde(deny_unknown_fields)]` so that misspelled or extra parameter keys
+// are rejected.
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindLargeFilesParams {
+    path: String,
+    min_size: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindProcessUsingPortParams {
+    port: u16,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KillProcessParams {
+    pid: Option<u32>,
+    name: Option<String>,
+    port: Option<u16>,
+    force: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallPackageParams {
+    name: String,
+    manager: Option<String>,
+    version: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartServiceParams {
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopServiceParams {
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenFileOrFolderParams {
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompressFolderParams {
+    path: String,
+    output: Option<String>,
+    exclude: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateBackupParams {
+    path: String,
+    dest: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExplainErrorParams {
+    command: Option<String>,
+    stderr: Option<String>,
+    exit_code: Option<i32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FixLastCommandParams {
+    last_command: String,
+    exit_code: i32,
+    stderr: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdatePackagesParams {
+    manager: Option<String>,
+    scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckSystemHealthParams {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InspectLogsParams {
+    source: Option<String>,
+    since: Option<String>,
+    filter: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateProjectParams {
+    kind: String,
+    name: String,
+    path: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GitCommitChangesParams {
+    message: String,
+    add_all: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskClarificationParams {
+    question: String,
+    options: Option<Vec<String>>,
+}
+
+/// Build a typed `Intent` from an intent name string and a `serde_json::Value`
+/// representing the parameters object. Each variant's parameters are deserialized
+/// with `deny_unknown_fields` enforced via the per-variant param structs above.
+fn build_intent_strict(intent_name: &str, params: Value) -> Result<Intent, IntentError> {
+    macro_rules! parse_params {
+        ($T:ty) => {
+            serde_json::from_value::<$T>(params).map_err(IntentError::MalformedJson)
+        };
+    }
+
+    match intent_name {
+        "find_large_files" => {
+            let p: FindLargeFilesParams = parse_params!(FindLargeFilesParams)?;
+            Ok(Intent::FindLargeFiles {
+                path: p.path,
+                min_size: p.min_size,
+                limit: p.limit,
+            })
+        }
+        "find_process_using_port" => {
+            let p: FindProcessUsingPortParams = parse_params!(FindProcessUsingPortParams)?;
+            Ok(Intent::FindProcessUsingPort { port: p.port })
+        }
+        "kill_process" => {
+            let p: KillProcessParams = parse_params!(KillProcessParams)?;
+            Ok(Intent::KillProcess {
+                pid: p.pid,
+                name: p.name,
+                port: p.port,
+                force: p.force,
+            })
+        }
+        "install_package" => {
+            let p: InstallPackageParams = parse_params!(InstallPackageParams)?;
+            Ok(Intent::InstallPackage {
+                name: p.name,
+                manager: p.manager,
+                version: p.version,
+            })
+        }
+        "start_service" => {
+            let p: StartServiceParams = parse_params!(StartServiceParams)?;
+            Ok(Intent::StartService { name: p.name })
+        }
+        "stop_service" => {
+            let p: StopServiceParams = parse_params!(StopServiceParams)?;
+            Ok(Intent::StopService { name: p.name })
+        }
+        "open_file_or_folder" => {
+            let p: OpenFileOrFolderParams = parse_params!(OpenFileOrFolderParams)?;
+            Ok(Intent::OpenFileOrFolder { path: p.path })
+        }
+        "compress_folder" => {
+            let p: CompressFolderParams = parse_params!(CompressFolderParams)?;
+            Ok(Intent::CompressFolder {
+                path: p.path,
+                output: p.output,
+                exclude: p.exclude,
+            })
+        }
+        "create_backup" => {
+            let p: CreateBackupParams = parse_params!(CreateBackupParams)?;
+            Ok(Intent::CreateBackup {
+                path: p.path,
+                dest: p.dest,
+            })
+        }
+        "explain_error" => {
+            let p: ExplainErrorParams = parse_params!(ExplainErrorParams)?;
+            Ok(Intent::ExplainError {
+                command: p.command,
+                stderr: p.stderr,
+                exit_code: p.exit_code,
+            })
+        }
+        "fix_last_command" => {
+            let p: FixLastCommandParams = parse_params!(FixLastCommandParams)?;
+            Ok(Intent::FixLastCommand {
+                last_command: p.last_command,
+                exit_code: p.exit_code,
+                stderr: p.stderr,
+            })
+        }
+        "update_packages" => {
+            let p: UpdatePackagesParams = parse_params!(UpdatePackagesParams)?;
+            Ok(Intent::UpdatePackages {
+                manager: p.manager,
+                scope: p.scope,
+            })
+        }
+        "check_system_health" => {
+            let _p: CheckSystemHealthParams = parse_params!(CheckSystemHealthParams)?;
+            Ok(Intent::CheckSystemHealth {})
+        }
+        "inspect_logs" => {
+            let p: InspectLogsParams = parse_params!(InspectLogsParams)?;
+            Ok(Intent::InspectLogs {
+                source: p.source,
+                since: p.since,
+                filter: p.filter,
+            })
+        }
+        "create_project" => {
+            let p: CreateProjectParams = parse_params!(CreateProjectParams)?;
+            Ok(Intent::CreateProject {
+                kind: p.kind,
+                name: p.name,
+                path: p.path,
+            })
+        }
+        "git_commit_changes" => {
+            let p: GitCommitChangesParams = parse_params!(GitCommitChangesParams)?;
+            Ok(Intent::GitCommitChanges {
+                message: p.message,
+                add_all: p.add_all,
+            })
+        }
+        "ask_clarification" => {
+            let p: AskClarificationParams = parse_params!(AskClarificationParams)?;
+            Ok(Intent::AskClarification {
+                question: p.question,
+                options: p.options,
+            })
+        }
+        other => Err(IntentError::MalformedJson(
+            serde::de::Error::unknown_variant(other, KNOWN_INTENT_NAMES),
+        )),
+    }
+}
+
+const KNOWN_INTENT_NAMES: &[&str] = &[
+    "find_large_files",
+    "find_process_using_port",
+    "kill_process",
+    "install_package",
+    "start_service",
+    "stop_service",
+    "open_file_or_folder",
+    "compress_folder",
+    "create_backup",
+    "explain_error",
+    "fix_last_command",
+    "update_packages",
+    "check_system_health",
+    "inspect_logs",
+    "create_project",
+    "git_commit_changes",
+    "ask_clarification",
+];
+
+// ---------------------------------------------------------------------------
+// Entry points
+// ---------------------------------------------------------------------------
+
+/// Parse **and validate** a JSON string produced by the model into a [`ProposedAction`].
+///
+/// This is the recommended entry point for all callers processing untrusted LLM output.
+/// It performs two checks beyond bare deserialization:
+///
+/// 1. **Strict schema**: unknown top-level fields and unknown parameter fields are
+///    rejected with [`IntentError::MalformedJson`].
+/// 2. **Domain validation**: calls [`ProposedAction::validate`], which checks
+///    parameter constraints (non-empty required strings, port ranges, confidence
+///    range, etc.) and returns [`IntentError::MissingParameter`] or
+///    [`IntentError::InvalidParameter`] on failure.
+///
+/// Use [`parse_model_output_unchecked`] only in internal/test code that intentionally
+/// bypasses validation.
 pub fn parse_model_output(json: &str) -> Result<ProposedAction, IntentError> {
-    let action: ProposedAction = serde_json::from_str(json)?;
+    let action = parse_model_output_unchecked(json)?;
+    action.validate()?;
     Ok(action)
+}
+
+/// Parse a JSON string produced by the model into a [`ProposedAction`] **without**
+/// calling [`ProposedAction::validate`].
+///
+/// Unknown top-level and parameter fields are still rejected (strict schema), but
+/// domain constraints (empty strings, port ranges, confidence bounds, etc.) are NOT
+/// checked. This is suitable for internal or test code that needs to inspect
+/// structurally-valid-but-domain-invalid data.
+///
+/// For production use at the untrusted LLM boundary, prefer [`parse_model_output`].
+pub fn parse_model_output_unchecked(json: &str) -> Result<ProposedAction, IntentError> {
+    // Stage 1: strict envelope parse — rejects unknown top-level fields.
+    let envelope: StrictEnvelope = serde_json::from_str(json)?;
+
+    // Stage 2: build typed Intent from name + parameters — rejects unknown param fields.
+    let intent = build_intent_strict(&envelope.intent, envelope.parameters)?;
+
+    Ok(ProposedAction {
+        intent,
+        risk: envelope.risk,
+        requires_confirmation: envelope.requires_confirmation,
+        explanation: envelope.explanation,
+        confidence: envelope.confidence,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -650,6 +989,7 @@ mod tests {
 
     // ------------------------------------------------------------------
     // Reject: missing required parameter (empty required string)
+    // (These use validate() directly since they test domain logic, not parse)
     // ------------------------------------------------------------------
     #[test]
     fn reject_empty_path_in_find_large_files() {
@@ -933,5 +1273,142 @@ mod tests {
         let err = parse_model_output("{{").expect_err("should fail");
         let s = err.to_string();
         assert!(s.contains("malformed JSON"));
+    }
+
+    // ------------------------------------------------------------------
+    // Fix 1: parse_model_output now validates — domain-invalid data rejected
+    // ------------------------------------------------------------------
+
+    /// parse_model_output rejects structurally-valid-but-domain-invalid JSON
+    /// (port == 0 is valid JSON / structural, but invalid domain-wise).
+    #[test]
+    fn parse_model_output_rejects_domain_invalid_port_zero() {
+        let json = r#"{
+            "intent": "find_process_using_port",
+            "parameters": { "port": 0 },
+            "explanation": "check port 0",
+            "confidence": 0.9
+        }"#;
+        let err = parse_model_output(json).expect_err("port 0 should be rejected");
+        assert!(
+            matches!(err, IntentError::InvalidParameter { field: "port", .. }),
+            "expected InvalidParameter for port, got: {err}"
+        );
+    }
+
+    /// parse_model_output_unchecked allows domain-invalid data through (for testing).
+    #[test]
+    fn parse_model_output_unchecked_allows_domain_invalid_port_zero() {
+        let json = r#"{
+            "intent": "find_process_using_port",
+            "parameters": { "port": 0 },
+            "explanation": "check port 0",
+            "confidence": 0.9
+        }"#;
+        let action = parse_model_output_unchecked(json)
+            .expect("unchecked should accept structurally-valid-but-domain-invalid JSON");
+        assert_eq!(action.intent, Intent::FindProcessUsingPort { port: 0 });
+    }
+
+    /// parse_model_output_unchecked allows confidence out of range.
+    #[test]
+    fn parse_model_output_unchecked_allows_out_of_range_confidence() {
+        let json = r#"{
+            "intent": "check_system_health",
+            "parameters": {},
+            "explanation": "x",
+            "confidence": 9.9
+        }"#;
+        let action =
+            parse_model_output_unchecked(json).expect("unchecked should allow confidence > 1");
+        assert!((action.confidence - 9.9).abs() < 1e-4);
+    }
+
+    // ------------------------------------------------------------------
+    // Fix 2: strict schema — reject unknown fields
+    // ------------------------------------------------------------------
+
+    /// Extra top-level field must be rejected.
+    #[test]
+    fn reject_extra_top_level_field() {
+        let json = r#"{
+            "intent": "find_process_using_port",
+            "parameters": { "port": 3000 },
+            "explanation": "x",
+            "confidence": 0.9,
+            "bogus": true
+        }"#;
+        let err = parse_model_output(json).expect_err("extra top-level field should be rejected");
+        assert!(
+            matches!(err, IntentError::MalformedJson(_)),
+            "expected MalformedJson, got: {err}"
+        );
+    }
+
+    /// Extra parameter field must be rejected.
+    #[test]
+    fn reject_extra_parameter_field() {
+        let json = r#"{
+            "intent": "find_process_using_port",
+            "parameters": { "port": 3000, "prt": 1 },
+            "explanation": "x",
+            "confidence": 0.9
+        }"#;
+        let err = parse_model_output(json).expect_err("extra parameter field should be rejected");
+        assert!(
+            matches!(err, IntentError::MalformedJson(_)),
+            "expected MalformedJson, got: {err}"
+        );
+    }
+
+    /// Misspelled parameter key must be rejected (e.g. "pth" instead of "path").
+    #[test]
+    fn reject_misspelled_parameter_field() {
+        let json = r#"{
+            "intent": "find_large_files",
+            "parameters": { "pth": "/tmp", "min_size": null },
+            "explanation": "x",
+            "confidence": 0.9
+        }"#;
+        let err =
+            parse_model_output(json).expect_err("misspelled parameter field should be rejected");
+        assert!(
+            matches!(err, IntentError::MalformedJson(_)),
+            "expected MalformedJson, got: {err}"
+        );
+    }
+
+    /// A well-formed object with all valid fields still parses correctly.
+    #[test]
+    fn accept_well_formed_object_with_all_valid_fields() {
+        let json = r#"{
+            "intent": "find_process_using_port",
+            "parameters": { "port": 3000 },
+            "risk": "read_only",
+            "requires_confirmation": false,
+            "explanation": "Checking which process uses port 3000.",
+            "confidence": 0.95
+        }"#;
+        let action = parse_model_output(json).expect("fully valid object should parse");
+        assert_eq!(action.intent, Intent::FindProcessUsingPort { port: 3000 });
+        assert_eq!(action.risk, Some(RiskHint::ReadOnly));
+        assert!(!action.requires_confirmation);
+        assert!((action.confidence - 0.95).abs() < 1e-4);
+    }
+
+    /// Extra top-level field is also rejected by parse_model_output_unchecked
+    /// (strict schema is enforced at both entry points).
+    #[test]
+    fn unchecked_also_rejects_extra_top_level_field() {
+        let json = r#"{
+            "intent": "check_system_health",
+            "parameters": {},
+            "explanation": "x",
+            "confidence": 0.9,
+            "sneaky": "injection"
+        }"#;
+        let err = parse_model_output_unchecked(json)
+            .expect_err("unchecked should also reject unknown top-level fields");
+        assert!(matches!(err, IntentError::MalformedJson(_)));
     }
 }

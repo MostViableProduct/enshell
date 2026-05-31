@@ -103,17 +103,60 @@ pub struct RiskDecision {
     pub reason: &'static str,
 }
 
+/// Whether the target path for a write intent is known to exist, known to be
+/// absent, or not yet probed.
+///
+/// This tri-state replaces a plain `bool` to make the **fail-closed** default
+/// explicit: callers who forget to probe the filesystem get `Unknown`, which the
+/// policy engine treats conservatively (as `Exists` / mutating) rather than
+/// optimistically (as `Absent` / create-only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TargetState {
+    /// The target path is known not to exist on disk.
+    /// Write intents may be classified as create-only.
+    Absent,
+    /// The target path is known to exist on disk.
+    /// Write intents are classified as mutating.
+    Exists,
+    /// The caller has not yet probed the filesystem (or the probe failed).
+    ///
+    /// **Fail-closed**: `Unknown` is treated identically to `Exists` (mutating)
+    /// so that a forgotten probe results in a stricter classification rather than
+    /// silently allowing `--yes`-eligible auto-confirmation.
+    #[default]
+    Unknown,
+}
+
 /// Caller-supplied contextual facts used by `classify`.
 ///
 /// All filesystem I/O is the caller's responsibility — `classify` is pure.
-/// The default (`ClassifyContext::default()`) represents the conservative case:
-/// `target_exists = false` (writing to a new, non-existent path).
-#[derive(Debug, Clone, Default)]
+///
+/// # Default
+///
+/// `ClassifyContext::default()` uses `target: TargetState::Unknown`, which is the
+/// **fail-closed** conservative case: write intents are classified as mutating
+/// (not `--yes`-eligible) until the caller explicitly probes the filesystem and
+/// supplies `TargetState::Absent` or `TargetState::Exists`.
+#[derive(Debug, Clone)]
 pub struct ClassifyContext {
-    /// `true`  → the target path (output file/dir) already exists on disk.
-    ///           This causes write intents to be classified as mutating.
-    /// `false` → target does not exist; write will create a new path (create-only).
-    pub target_exists: bool,
+    /// Whether the target path (output file/dir) is known to exist, absent, or
+    /// unprobed. Controls whether write intents are create-only or mutating.
+    ///
+    /// See [`TargetState`] for the fail-closed semantics of `Unknown`.
+    pub target: TargetState,
+}
+
+impl Default for ClassifyContext {
+    /// Returns the **fail-closed** default: `target: TargetState::Unknown`.
+    ///
+    /// Callers who forget to probe the filesystem receive a conservative
+    /// `LocalWriteMutating` classification (not `--yes`-eligible) rather than
+    /// the more permissive `LocalWriteCreateOnly`.
+    fn default() -> Self {
+        ClassifyContext {
+            target: TargetState::Unknown,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -163,59 +206,62 @@ pub fn classify(intent: &Intent, ctx: &ClassifyContext) -> RiskDecision {
         ),
 
         // ------------------------------------------------------------------
-        // Local-write intents: create-only vs mutating depends on target_exists
+        // Local-write intents: create-only vs mutating depends on target state.
+        //
+        // Fail-closed: TargetState::Unknown is treated as Exists (mutating) so
+        // that callers who forget to probe the filesystem do NOT accidentally
+        // get a --yes-eligible classification.
         // ------------------------------------------------------------------
-        Intent::CompressFolder { .. } => {
-            if ctx.target_exists {
-                tier_decision(
-                    RiskTier::LocalWriteMutating,
-                    "compress_folder: output archive already exists and would be overwritten",
-                )
-            } else {
-                tier_decision(
-                    RiskTier::LocalWriteCreateOnly,
-                    "compress_folder: output archive does not exist; writing a new file",
-                )
-            }
-        }
-        Intent::CreateBackup { .. } => {
-            if ctx.target_exists {
-                tier_decision(
-                    RiskTier::LocalWriteMutating,
-                    "create_backup: destination already exists and would be overwritten",
-                )
-            } else {
-                tier_decision(
-                    RiskTier::LocalWriteCreateOnly,
-                    "create_backup: destination does not exist; writing a new backup",
-                )
-            }
-        }
-        Intent::CreateProject { .. } => {
-            if ctx.target_exists {
-                tier_decision(
-                    RiskTier::LocalWriteMutating,
-                    "create_project: target directory already exists and would be modified",
-                )
-            } else {
-                tier_decision(
-                    RiskTier::LocalWriteCreateOnly,
-                    "create_project: target directory does not exist; creating a new project",
-                )
-            }
-        }
-        Intent::GitCommitChanges { .. } => {
-            // GitCommitChanges has no amend flag in the current intent schema.
-            // A plain `git commit` always creates a new commit object and does
-            // not overwrite existing history, so it is always create-only
-            // regardless of ctx.target_exists.  If an `amend` flag is added in
-            // a future schema version, it must be re-classified as mutating.
-            tier_decision(
+        Intent::CompressFolder { .. } => match ctx.target {
+            TargetState::Absent => tier_decision(
                 RiskTier::LocalWriteCreateOnly,
-                "git_commit_changes: creates a new commit object; no existing history is mutated \
-                 (no amend flag in this schema version)",
-            )
-        }
+                "compress_folder: output archive does not exist; writing a new file",
+            ),
+            TargetState::Exists | TargetState::Unknown => tier_decision(
+                RiskTier::LocalWriteMutating,
+                "compress_folder: output archive already exists (or existence is unknown); \
+                 treating as mutating (fail-closed)",
+            ),
+        },
+        Intent::CreateBackup { .. } => match ctx.target {
+            TargetState::Absent => tier_decision(
+                RiskTier::LocalWriteCreateOnly,
+                "create_backup: destination does not exist; writing a new backup",
+            ),
+            TargetState::Exists | TargetState::Unknown => tier_decision(
+                RiskTier::LocalWriteMutating,
+                "create_backup: destination already exists (or existence is unknown); \
+                 treating as mutating (fail-closed)",
+            ),
+        },
+        Intent::CreateProject { .. } => match ctx.target {
+            TargetState::Absent => tier_decision(
+                RiskTier::LocalWriteCreateOnly,
+                "create_project: target directory does not exist; creating a new project",
+            ),
+            TargetState::Exists | TargetState::Unknown => tier_decision(
+                RiskTier::LocalWriteMutating,
+                "create_project: target directory already exists (or existence is unknown); \
+                 treating as mutating (fail-closed)",
+            ),
+        },
+
+        // ------------------------------------------------------------------
+        // GitCommitChanges: always LocalWriteMutating.
+        //
+        // A `git commit` mutates branch ref, index, and HEAD state. Auto-
+        // committing via `--yes` could silently commit unintended staged
+        // changes. The action is recoverable (`git reset --soft HEAD~1`) but
+        // the policy tier is Mutating — interactive confirmation is always
+        // required. There is no amend flag in the current schema, but even a
+        // plain commit is a mutation of repo state.
+        // ------------------------------------------------------------------
+        Intent::GitCommitChanges { .. } => tier_decision(
+            RiskTier::LocalWriteMutating,
+            "git_commit_changes: mutates branch ref, index, and HEAD state; \
+             auto-confirming via --yes could silently commit unintended staged changes \
+             (recoverable via git reset --soft HEAD~1, but interactive confirmation required)",
+        ),
 
         // ------------------------------------------------------------------
         // KillProcess: mutating normally; Destructive when force == Some(true)
@@ -395,15 +441,24 @@ mod tests {
     use super::*;
     use enshell_intents::Intent;
 
-    // Helper: default context (target does not exist → create-only for write intents)
-    fn ctx_new() -> ClassifyContext {
-        ClassifyContext::default()
+    // Helper: context where target is known absent → create-only for write intents
+    fn ctx_absent() -> ClassifyContext {
+        ClassifyContext {
+            target: TargetState::Absent,
+        }
     }
 
     // Helper: context where the target already exists → mutating for write intents
     fn ctx_exists() -> ClassifyContext {
         ClassifyContext {
-            target_exists: true,
+            target: TargetState::Exists,
+        }
+    }
+
+    // Helper: context where target state is unknown → fail-closed (mutating)
+    fn ctx_unknown() -> ClassifyContext {
+        ClassifyContext {
+            target: TargetState::Unknown,
         }
     }
 
@@ -418,14 +473,14 @@ mod tests {
             min_size: None,
             limit: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::ReadOnly);
     }
 
     #[test]
     fn find_process_using_port_is_read_only() {
         let intent = Intent::FindProcessUsingPort { port: 3000 };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::ReadOnly);
     }
 
@@ -434,7 +489,7 @@ mod tests {
         let intent = Intent::OpenFileOrFolder {
             path: "/home/user/docs".into(),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::ReadOnly);
     }
 
@@ -445,7 +500,7 @@ mod tests {
             stderr: Some("error[E0308]".into()),
             exit_code: Some(101),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::ReadOnly);
     }
 
@@ -458,14 +513,14 @@ mod tests {
             exit_code: 127,
             stderr: "command not found".into(),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::ReadOnly);
     }
 
     #[test]
     fn check_system_health_is_read_only() {
         let intent = Intent::CheckSystemHealth {};
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::ReadOnly);
     }
 
@@ -476,7 +531,7 @@ mod tests {
             since: Some("1h".into()),
             filter: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::ReadOnly);
     }
 
@@ -492,7 +547,7 @@ mod tests {
             port: None,
             force: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::LocalWriteMutating);
     }
 
@@ -504,7 +559,7 @@ mod tests {
             port: None,
             force: Some(false),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::LocalWriteMutating);
     }
 
@@ -516,7 +571,7 @@ mod tests {
             port: None,
             force: Some(true),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::Destructive);
     }
 
@@ -528,7 +583,7 @@ mod tests {
             port: None,
             force: Some(true),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(d.deny_by_default);
     }
 
@@ -540,33 +595,33 @@ mod tests {
             port: None,
             force: Some(true),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.undo, UndoRequirement::Mandatory);
     }
 
     // ------------------------------------------------------------------
-    // CompressFolder: ctx.target_exists controls tier
+    // CompressFolder: TargetState controls tier
     // ------------------------------------------------------------------
 
     #[test]
-    fn compress_folder_new_target_is_create_only() {
+    fn compress_folder_absent_target_is_create_only() {
         let intent = Intent::CompressFolder {
             path: "/projects/app".into(),
             output: Some("/tmp/app.tar.gz".into()),
             exclude: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::LocalWriteCreateOnly);
     }
 
     #[test]
-    fn compress_folder_new_target_yes_eligible() {
+    fn compress_folder_absent_target_yes_eligible() {
         let intent = Intent::CompressFolder {
             path: "/projects/app".into(),
             output: None,
             exclude: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(d.yes_eligible, "create-only should be yes_eligible");
     }
 
@@ -595,17 +650,56 @@ mod tests {
         );
     }
 
+    /// Fail-closed: Unknown target → LocalWriteMutating, not --yes-eligible.
+    #[test]
+    fn compress_folder_unknown_target_is_mutating_fail_closed() {
+        let intent = Intent::CompressFolder {
+            path: "/projects/app".into(),
+            output: None,
+            exclude: None,
+        };
+        let d = classify(&intent, &ctx_unknown());
+        assert_eq!(
+            d.tier,
+            RiskTier::LocalWriteMutating,
+            "Unknown target must fail-closed to LocalWriteMutating"
+        );
+        assert!(!d.yes_eligible, "Unknown target must not be yes_eligible");
+        assert!(
+            !auto_confirm_allowed(&d, true),
+            "Unknown target must block auto_confirm even with --yes"
+        );
+    }
+
+    /// Fail-closed: ClassifyContext::default() → Unknown → LocalWriteMutating.
+    #[test]
+    fn compress_folder_default_context_is_mutating_fail_closed() {
+        let intent = Intent::CompressFolder {
+            path: "/projects/app".into(),
+            output: None,
+            exclude: None,
+        };
+        let d = classify(&intent, &ClassifyContext::default());
+        assert_eq!(
+            d.tier,
+            RiskTier::LocalWriteMutating,
+            "default ClassifyContext must fail-closed to LocalWriteMutating"
+        );
+        assert!(!d.yes_eligible);
+        assert!(!auto_confirm_allowed(&d, true));
+    }
+
     // ------------------------------------------------------------------
-    // CreateBackup: ctx.target_exists controls tier
+    // CreateBackup: TargetState controls tier
     // ------------------------------------------------------------------
 
     #[test]
-    fn create_backup_new_dest_is_create_only() {
+    fn create_backup_absent_dest_is_create_only() {
         let intent = Intent::CreateBackup {
             path: "/data".into(),
             dest: Some("/backups/data-2024".into()),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::LocalWriteCreateOnly);
     }
 
@@ -619,18 +713,48 @@ mod tests {
         assert_eq!(d.tier, RiskTier::LocalWriteMutating);
     }
 
+    /// Fail-closed: Unknown target → LocalWriteMutating, not --yes-eligible.
+    #[test]
+    fn create_backup_unknown_target_is_mutating_fail_closed() {
+        let intent = Intent::CreateBackup {
+            path: "/data".into(),
+            dest: None,
+        };
+        let d = classify(&intent, &ctx_unknown());
+        assert_eq!(
+            d.tier,
+            RiskTier::LocalWriteMutating,
+            "Unknown target must fail-closed to LocalWriteMutating"
+        );
+        assert!(!d.yes_eligible);
+        assert!(!auto_confirm_allowed(&d, true));
+    }
+
+    /// Fail-closed: ClassifyContext::default() → Unknown → LocalWriteMutating.
+    #[test]
+    fn create_backup_default_context_is_mutating_fail_closed() {
+        let intent = Intent::CreateBackup {
+            path: "/data".into(),
+            dest: None,
+        };
+        let d = classify(&intent, &ClassifyContext::default());
+        assert_eq!(d.tier, RiskTier::LocalWriteMutating);
+        assert!(!d.yes_eligible);
+        assert!(!auto_confirm_allowed(&d, true));
+    }
+
     // ------------------------------------------------------------------
-    // CreateProject: ctx.target_exists controls tier
+    // CreateProject: TargetState controls tier
     // ------------------------------------------------------------------
 
     #[test]
-    fn create_project_new_path_is_create_only() {
+    fn create_project_absent_path_is_create_only() {
         let intent = Intent::CreateProject {
             kind: "nextjs".into(),
             name: "my-app".into(),
             path: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::LocalWriteCreateOnly);
     }
 
@@ -645,30 +769,113 @@ mod tests {
         assert_eq!(d.tier, RiskTier::LocalWriteMutating);
     }
 
+    /// Fail-closed: Unknown target → LocalWriteMutating, not --yes-eligible.
+    #[test]
+    fn create_project_unknown_target_is_mutating_fail_closed() {
+        let intent = Intent::CreateProject {
+            kind: "nextjs".into(),
+            name: "my-app".into(),
+            path: None,
+        };
+        let d = classify(&intent, &ctx_unknown());
+        assert_eq!(
+            d.tier,
+            RiskTier::LocalWriteMutating,
+            "Unknown target must fail-closed to LocalWriteMutating"
+        );
+        assert!(!d.yes_eligible);
+        assert!(!auto_confirm_allowed(&d, true));
+    }
+
+    /// Fail-closed: ClassifyContext::default() → Unknown → LocalWriteMutating.
+    #[test]
+    fn create_project_default_context_is_mutating_fail_closed() {
+        let intent = Intent::CreateProject {
+            kind: "rust".into(),
+            name: "proj".into(),
+            path: None,
+        };
+        let d = classify(&intent, &ClassifyContext::default());
+        assert_eq!(d.tier, RiskTier::LocalWriteMutating);
+        assert!(!d.yes_eligible);
+        assert!(!auto_confirm_allowed(&d, true));
+    }
+
     // ------------------------------------------------------------------
-    // GitCommitChanges: always create-only (no amend flag in schema)
+    // GitCommitChanges: always LocalWriteMutating (reclassified from create-only)
+    //
+    // A commit mutates branch ref, index, and HEAD state. Auto-confirming via
+    // --yes could silently commit unintended staged changes.
     // ------------------------------------------------------------------
 
     #[test]
-    fn git_commit_changes_is_always_create_only() {
+    fn git_commit_changes_is_always_mutating() {
         let intent = Intent::GitCommitChanges {
             message: "feat: add thing".into(),
             add_all: Some(true),
         };
-        // Even when target_exists=true, GitCommitChanges is create-only because
-        // there is no amend flag in the current schema version.
         let d = classify(&intent, &ctx_exists());
-        assert_eq!(d.tier, RiskTier::LocalWriteCreateOnly);
+        assert_eq!(
+            d.tier,
+            RiskTier::LocalWriteMutating,
+            "GitCommitChanges must be LocalWriteMutating (not create-only)"
+        );
     }
 
     #[test]
-    fn git_commit_changes_new_is_create_only() {
+    fn git_commit_changes_absent_target_still_mutating() {
         let intent = Intent::GitCommitChanges {
             message: "fix: correction".into(),
             add_all: None,
         };
-        let d = classify(&intent, &ctx_new());
-        assert_eq!(d.tier, RiskTier::LocalWriteCreateOnly);
+        let d = classify(&intent, &ctx_absent());
+        assert_eq!(
+            d.tier,
+            RiskTier::LocalWriteMutating,
+            "GitCommitChanges must be LocalWriteMutating regardless of TargetState::Absent"
+        );
+    }
+
+    #[test]
+    fn git_commit_changes_unknown_target_is_mutating() {
+        let intent = Intent::GitCommitChanges {
+            message: "chore: update deps".into(),
+            add_all: None,
+        };
+        let d = classify(&intent, &ctx_unknown());
+        assert_eq!(d.tier, RiskTier::LocalWriteMutating);
+    }
+
+    #[test]
+    fn git_commit_changes_not_yes_eligible() {
+        let intent = Intent::GitCommitChanges {
+            message: "feat: new thing".into(),
+            add_all: Some(false),
+        };
+        let d = classify(&intent, &ctx_absent());
+        assert!(!d.yes_eligible, "GitCommitChanges must NOT be yes_eligible");
+    }
+
+    #[test]
+    fn git_commit_changes_auto_confirm_blocked() {
+        let intent = Intent::GitCommitChanges {
+            message: "fix: something".into(),
+            add_all: None,
+        };
+        // Test all TargetState variants — all must block auto-confirm
+        for ctx in [
+            ctx_absent(),
+            ctx_exists(),
+            ctx_unknown(),
+            ClassifyContext::default(),
+        ] {
+            let d = classify(&intent, &ctx);
+            assert!(
+                !auto_confirm_allowed(&d, true),
+                "GitCommitChanges must block auto_confirm_allowed with --yes (target: {:?})",
+                ctx.target
+            );
+        }
     }
 
     // ------------------------------------------------------------------
@@ -682,7 +889,7 @@ mod tests {
             manager: None,
             version: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::PackageSystemChange);
     }
 
@@ -691,7 +898,7 @@ mod tests {
         let intent = Intent::StartService {
             name: "postgresql".into(),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::PackageSystemChange);
     }
 
@@ -700,7 +907,7 @@ mod tests {
         let intent = Intent::StopService {
             name: "nginx".into(),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::PackageSystemChange);
     }
 
@@ -710,7 +917,7 @@ mod tests {
             manager: Some("apt".into()),
             scope: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::PackageSystemChange);
     }
 
@@ -724,7 +931,7 @@ mod tests {
             question: "Which package manager?".into(),
             options: Some(vec!["brew".into(), "apt".into()]),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::UnsupportedAmbiguous);
     }
 
@@ -734,7 +941,7 @@ mod tests {
             question: "Can you clarify?".into(),
             options: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(!is_mvp_executable(&d));
     }
 
@@ -745,7 +952,7 @@ mod tests {
     #[test]
     fn auto_confirm_allowed_for_read_only_with_yes() {
         let intent = Intent::CheckSystemHealth {};
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(auto_confirm_allowed(&d, true));
     }
 
@@ -756,7 +963,7 @@ mod tests {
             output: None,
             exclude: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(auto_confirm_allowed(&d, true));
     }
 
@@ -772,7 +979,7 @@ mod tests {
             port: None,
             force: Some(true),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(
             !auto_confirm_allowed(&d, true),
             "Destructive must NOT be auto-confirmed with --yes"
@@ -786,7 +993,7 @@ mod tests {
             manager: None,
             version: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(
             !auto_confirm_allowed(&d, true),
             "PackageSystemChange must NOT be auto-confirmed with --yes"
@@ -816,7 +1023,7 @@ mod tests {
             port: None,
             force: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(
             !auto_confirm_allowed(&d, true),
             "LocalWriteMutating kill must NOT be auto-confirmed with --yes"
@@ -827,7 +1034,7 @@ mod tests {
     fn auto_confirm_false_when_yes_flag_false() {
         // Even for ReadOnly, if yes_flag is false, no auto-confirm
         let intent = Intent::CheckSystemHealth {};
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(!auto_confirm_allowed(&d, false));
     }
 
@@ -843,7 +1050,7 @@ mod tests {
             port: None,
             force: Some(true),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(requires_typed_confirmation(&d));
     }
 
@@ -854,7 +1061,7 @@ mod tests {
             min_size: None,
             limit: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(!requires_typed_confirmation(&d));
     }
 
@@ -864,7 +1071,7 @@ mod tests {
             manager: None,
             scope: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(!requires_typed_confirmation(&d));
     }
 
@@ -880,7 +1087,7 @@ mod tests {
             port: None,
             force: Some(true),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::Destructive);
         assert_eq!(d.confirmation, ConfirmationKind::Typed);
         assert!(!d.yes_eligible);
@@ -918,7 +1125,7 @@ mod tests {
     #[test]
     fn is_mvp_executable_true_for_read_only() {
         let intent = Intent::FindProcessUsingPort { port: 8080 };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(is_mvp_executable(&d));
     }
 
@@ -929,7 +1136,7 @@ mod tests {
             output: None,
             exclude: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(!is_mvp_executable(&d));
     }
 
@@ -949,7 +1156,7 @@ mod tests {
         let intent = Intent::StartService {
             name: "nginx".into(),
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(!is_mvp_executable(&d));
     }
 
@@ -959,7 +1166,7 @@ mod tests {
             question: "what?".into(),
             options: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert!(!is_mvp_executable(&d));
     }
 
@@ -974,7 +1181,7 @@ mod tests {
             since: None,
             filter: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::ReadOnly);
         assert_eq!(d.confirmation, ConfirmationKind::Light);
         assert!(!d.requires_elevation_ack);
@@ -993,7 +1200,7 @@ mod tests {
             path: "/data".into(),
             dest: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::LocalWriteCreateOnly);
         assert_eq!(d.confirmation, ConfirmationKind::Explicit);
         assert!(!d.requires_elevation_ack);
@@ -1032,7 +1239,7 @@ mod tests {
             manager: Some("brew".into()),
             version: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::PackageSystemChange);
         assert_eq!(d.confirmation, ConfirmationKind::Explicit);
         assert!(!d.requires_elevation_ack);
@@ -1051,7 +1258,7 @@ mod tests {
             question: "Which manager?".into(),
             options: None,
         };
-        let d = classify(&intent, &ctx_new());
+        let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::UnsupportedAmbiguous);
         assert!(!d.yes_eligible);
         assert!(!d.deny_by_default); // just don't run — not blocked by deny_by_default
@@ -1059,13 +1266,22 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // ClassifyContext::default() is target_exists = false
+    // ClassifyContext::default() is TargetState::Unknown (fail-closed)
     // ------------------------------------------------------------------
 
     #[test]
-    fn classify_context_default_is_target_not_exists() {
+    fn classify_context_default_is_target_unknown() {
         let ctx = ClassifyContext::default();
-        assert!(!ctx.target_exists);
+        assert_eq!(
+            ctx.target,
+            TargetState::Unknown,
+            "default ClassifyContext must be Unknown (fail-closed), not Absent"
+        );
+    }
+
+    #[test]
+    fn target_state_default_is_unknown() {
+        assert_eq!(TargetState::default(), TargetState::Unknown);
     }
 
     // ------------------------------------------------------------------
@@ -1150,7 +1366,7 @@ mod tests {
     #[test]
     fn reason_is_nonempty_for_all_intents() {
         for intent in all_test_intents() {
-            let d = classify(&intent, &ctx_new());
+            let d = classify(&intent, &ctx_absent());
             assert!(
                 !d.reason.is_empty(),
                 "reason was empty for intent: {intent:?}"
@@ -1172,7 +1388,7 @@ mod tests {
         // (Since classify never accepts a RiskHint, any RiskHint the model
         // emitted has no path into classify — this is enforced by the type system.)
         let intent = Intent::CheckSystemHealth {};
-        let ctx = ctx_new();
+        let ctx = ctx_absent();
         let d1 = classify(&intent, &ctx);
         let d2 = classify(&intent, &ctx);
         assert_eq!(d1.tier, d2.tier);
