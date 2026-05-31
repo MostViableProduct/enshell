@@ -7,10 +7,9 @@
 //!   the model's `"intent"` + `"parameters"` JSON shape.
 //! - [`ProposedAction`]: wraps an intent with model advisory metadata (risk hint,
 //!   explanation, confidence, requires_confirmation).
-//! - [`parse_model_output`]: entry-point to parse **and validate** model JSON into a
-//!   [`ProposedAction`]. Unknown top-level and parameter fields are rejected.
-//! - [`parse_model_output_unchecked`]: structural deserialization only — no domain
-//!   validation, intended for internal or test use.
+//! - [`parse_model_output`]: the single public entry-point to parse **and validate**
+//!   model JSON into a [`ProposedAction`]. Unknown top-level and parameter fields are
+//!   rejected. (A crate-private unchecked variant exists for internal/test use only.)
 //! - [`IntentError`]: typed errors for parse/validation failures.
 //! - [`SCHEMA_VERSION`]: the catalog version; increment on breaking changes.
 //!
@@ -652,8 +651,8 @@ const KNOWN_INTENT_NAMES: &[&str] = &[
 ///    range, etc.) and returns [`IntentError::MissingParameter`] or
 ///    [`IntentError::InvalidParameter`] on failure.
 ///
-/// Use [`parse_model_output_unchecked`] only in internal/test code that intentionally
-/// bypasses validation.
+/// This is the only public parser; a crate-private unchecked variant is used by
+/// internal/test code that intentionally bypasses domain validation.
 pub fn parse_model_output(json: &str) -> Result<ProposedAction, IntentError> {
     let action = parse_model_output_unchecked(json)?;
     action.validate()?;
