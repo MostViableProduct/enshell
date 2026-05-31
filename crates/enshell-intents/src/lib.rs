@@ -669,7 +669,11 @@ pub fn parse_model_output(json: &str) -> Result<ProposedAction, IntentError> {
 /// structurally-valid-but-domain-invalid data.
 ///
 /// For production use at the untrusted LLM boundary, prefer [`parse_model_output`].
-pub fn parse_model_output_unchecked(json: &str) -> Result<ProposedAction, IntentError> {
+///
+/// Crate-internal only: this is deliberately `pub(crate)` so external callers
+/// cannot bypass validation at the LLM boundary. Re-expose deliberately if a
+/// future crate genuinely needs unchecked parsing.
+pub(crate) fn parse_model_output_unchecked(json: &str) -> Result<ProposedAction, IntentError> {
     // Stage 1: strict envelope parse — rejects unknown top-level fields.
     let envelope: StrictEnvelope = serde_json::from_str(json)?;
 
