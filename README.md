@@ -23,14 +23,17 @@ yet). The `enshell` binary builds and runs:
 ```bash
 enshell --dry-run "what is using port 3000"   # preview the plan + command, run nothing
 enshell --yes "find the largest files here"   # read-only, auto-confirmed, executes
+enshell history                                # past actions (tamper-evident audit log)
 enshell doctor                                 # environment self-check
 ```
 
 It recognizes a curated set of read-only requests (process-on-port, large files,
 system health, logs, open), previews them in plain English, asks for confirmation,
-and executes via a no-shell command executor. Natural-language understanding is
-currently a deterministic stub, and write/system actions are designed but not yet
-executable (read-only only). Not a finished product.
+executes via a no-shell command executor, and records each run to a local,
+**tamper-evident (hash-chained) audit log** surfaced by `enshell history`.
+Natural-language understanding is currently a deterministic stub, and write/system
+actions are designed but not yet executable (read-only only). Not a finished
+product.
 
 ## How it works (design)
 

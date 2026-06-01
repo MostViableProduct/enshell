@@ -11,17 +11,20 @@ and their licenses.
 
 ## Current Status
 
-The workspace has third-party dependencies in two groups:
+The workspace has third-party dependencies in three groups:
 
-- **Serialization** (`enshell-intents`, `enshell-model`): `serde` (+`serde_derive`,
-  `serde_core`), `serde_json`, and their transitive crates (`itoa`, `memchr`,
-  `zmij` — David Tolnay's `ryu`-successor float formatter, `proc-macro2`, `quote`,
-  `syn`, `unicode-ident`).
+- **Serialization** (`enshell-intents`, `enshell-model`, `enshell-telemetry`,
+  `enshell-cli`): `serde` (+`serde_derive`, `serde_core`), `serde_json`, and their
+  transitive crates (`itoa`, `memchr`, `zmij` — David Tolnay's `ryu`-successor float
+  formatter, `proc-macro2`, `quote`, `syn`, `unicode-ident`).
 - **CLI** (`enshell-cli`): `clap` (argument parsing, with `derive`) and `ctrlc`
   (Ctrl-C → cancellation), plus their transitive crates (anstyle/anstream,
   clap_builder/clap_lex/clap_derive, etc.).
+- **Hashing** (`enshell-telemetry`, for the tamper-evident audit-log hash chain):
+  `sha2` (RustCrypto) and its transitive crates (`digest`, `block-buffer`,
+  `crypto-common`, `cpufeatures`, `typenum`, `const-oid`, `hybrid-array`, `libc`).
 
-Together these are roughly **30+ third-party crates**. Every one resolves to a
+Together these are roughly **40 third-party crates**. Every one resolves to a
 permissive, Apache-2.0-compatible license drawn from the allowlist in
 [`deny.toml`](deny.toml): **Apache-2.0, MIT, Unicode-3.0, Unlicense** (a few crates
 additionally offer `Zlib` as an *alternative* in an `OR` expression; it is not the

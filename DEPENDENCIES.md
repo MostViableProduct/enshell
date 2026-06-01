@@ -10,11 +10,12 @@ This file is the dependency license inventory for the enShell workspace.
 
 ## Current Status
 
-The workspace has two groups of third-party dependencies — serialization
-(`serde`/`serde_json` via `enshell-intents`/`enshell-model`) and CLI (`clap` +
-`ctrlc` via `enshell-cli`) — for roughly **30+ crates** including transitives. All
-resolve to permissive licenses in the allowlist: **Apache-2.0, MIT, Unicode-3.0,
-Unlicense** (some crates also offer `Zlib` as an unselected `OR` alternative). See
+The workspace has three groups of third-party dependencies — serialization
+(`serde`/`serde_json`), CLI (`clap` + `ctrlc` via `enshell-cli`), and hashing
+(`sha2` via `enshell-telemetry`, for the audit-log hash chain) — for roughly **40
+crates** including transitives. All resolve to permissive licenses in the
+allowlist: **Apache-2.0, MIT, Unicode-3.0, Unlicense** (some crates also offer
+`Zlib` as an unselected `OR` alternative). See
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the grouping.
 
 **License enforcement is live:** [`deny.toml`](deny.toml) defines the allowlist and
