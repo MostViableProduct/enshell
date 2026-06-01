@@ -1086,7 +1086,16 @@ fn execute_pipeline_controlled(
         }
     };
 
-    // ── Phase 3: reap intermediate children, collect stderr captures ───────────
+    // ── Phase 3: reap intermediate children by polling, checking cancel/deadline ──
+    //
+    // After the last stage exits, intermediates may still be running (e.g. in
+    // `sleep 10 | true`, `sleep` keeps running after `true` exits).  We must
+    // NOT block with `child.wait()` here because that would ignore the deadline
+    // and cancel flag — a 200ms timeout would not fire until `sleep` finishes.
+    //
+    // Instead we poll each intermediate with `try_wait()`, sleeping POLL_INTERVAL
+    // between rounds, and check cancel/deadline on every tick.  On abort we kill
+    // all remaining children, join drain threads, and return the control error.
 
     let last_exit_code = last_status.code();
     let last_stdout_bytes = last_stdout_thread.join().unwrap_or_default();
@@ -1094,14 +1103,60 @@ fn execute_pipeline_controlled(
     let last_stdout = String::from_utf8_lossy(&last_stdout_bytes).into_owned();
     let last_stderr = String::from_utf8_lossy(&last_stderr_bytes).into_owned();
 
+    // Track which intermediates have already been reaped and their exit status.
+    // `None` = not yet exited; `Some(result)` = exited with this outcome.
+    let n = intermediate_children.len();
+    let mut intermediate_results: Vec<Option<Result<std::process::ExitStatus, ()>>> = vec![None; n];
+
+    // Poll until every intermediate is reaped or we hit a control condition.
+    loop {
+        // Check cancel/deadline before each round of polling.
+        if let Some(ctrl_err) = check_control(cancel, deadline) {
+            // Kill all still-running intermediates, then join drain threads.
+            kill_and_reap(&mut intermediate_children);
+            for handle in stderr_threads {
+                let _ = handle.join();
+            }
+            return Err(ctrl_err);
+        }
+
+        let mut all_done = true;
+        for (idx, child) in intermediate_children.iter_mut().enumerate() {
+            if intermediate_results[idx].is_some() {
+                // Already reaped.
+                continue;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    intermediate_results[idx] = Some(Ok(status));
+                }
+                Ok(None) => {
+                    // Still running.
+                    all_done = false;
+                }
+                Err(_) => {
+                    // try_wait itself failed; record as an error result.
+                    intermediate_results[idx] = Some(Err(()));
+                }
+            }
+        }
+
+        if all_done {
+            break;
+        }
+
+        thread::sleep(POLL_INTERVAL);
+    }
+
+    // All intermediates are now reaped.  Collect results into first_failure.
     let mut first_failure: Option<ExecError> = None;
     let mut first_failing_idx: Option<usize> = None;
 
-    for (idx, child) in intermediate_children.iter_mut().enumerate() {
-        match child.wait() {
-            Ok(status) if status.success() => {}
-            Ok(status) if terminated_by_sigpipe(&status) => {}
-            Ok(status) => {
+    for (idx, result) in intermediate_results.into_iter().enumerate() {
+        match result {
+            Some(Ok(status)) if status.success() => {}
+            Some(Ok(status)) if terminated_by_sigpipe(&status) => {}
+            Some(Ok(status)) => {
                 if first_failure.is_none() {
                     first_failing_idx = Some(idx);
                     first_failure = Some(ExecError::NonZeroExit {
@@ -1110,7 +1165,7 @@ fn execute_pipeline_controlled(
                     });
                 }
             }
-            Err(_) => {
+            Some(Err(())) | None => {
                 if first_failure.is_none() {
                     first_failure = Some(ExecError::Io(io::Error::other(format!(
                         "failed to wait on pipeline stage {idx}"
@@ -1900,6 +1955,51 @@ mod tests {
             assert!(
                 elapsed < Duration::from_secs(2),
                 "pipeline timeout took too long: {elapsed:?}"
+            );
+        }
+
+        /// Pipeline timeout with a long-running INTERMEDIATE stage: `sleep 10 | true`
+        /// with a 200ms timeout → `Err(TimedOut)` returned promptly (well under 2s).
+        ///
+        /// This is the specific regression case for the "controlled pipeline ignores
+        /// deadline while reaping intermediates" bug: `true` exits immediately (it is
+        /// the last stage), but `sleep 10` keeps running as an intermediate.  If the
+        /// intermediate is reaped with a blocking `wait()`, the 200ms timeout never
+        /// fires until `sleep` finishes ~10s later.
+        ///
+        /// The fix polls intermediates with `try_wait()` and checks cancel/deadline on
+        /// each tick, so the timeout fires promptly and `sleep` is killed+reaped before
+        /// this function returns (no orphaned processes).
+        #[test]
+        fn test_controlled_pipeline_timeout_sleep_intermediate() {
+            let plan = CommandPlan::pipeline(vec![
+                ExecStep::new("sleep", ["10"]),
+                ExecStep::new("true", [] as [&str; 0]),
+            ]);
+            let control = ExecControl {
+                timeout: Some(Duration::from_millis(200)),
+                ..ExecControl::default()
+            };
+
+            let (tx, rx) = mpsc::channel();
+            let start = Instant::now();
+            std::thread::spawn(move || {
+                let _ = tx.send(execute_controlled(&plan, &control));
+            });
+
+            // Guard: if the bug is present the call blocks ~10s; recv_timeout catches it.
+            let result = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("execute_controlled hung — intermediate reap did not check deadline");
+
+            let elapsed = start.elapsed();
+            assert!(
+                matches!(result, Err(ExecError::TimedOut)),
+                "expected TimedOut from `sleep 10 | true`, got {result:?}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "pipeline intermediate-reap timeout took too long: {elapsed:?}"
             );
         }
 
