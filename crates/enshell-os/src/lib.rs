@@ -1112,8 +1112,15 @@ fn execute_pipeline_controlled(
     loop {
         // Check cancel/deadline before each round of polling.
         if let Some(ctrl_err) = check_control(cancel, deadline) {
-            // Kill all still-running intermediates, then join drain threads.
-            kill_and_reap(&mut intermediate_children);
+            // Kill + reap only intermediates that have NOT already exited;
+            // already-reaped children (intermediate_results[idx] == Some) were
+            // collected via try_wait() and need no further handling.
+            for (idx, child) in intermediate_children.iter_mut().enumerate() {
+                if intermediate_results[idx].is_none() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
             for handle in stderr_threads {
                 let _ = handle.join();
             }
