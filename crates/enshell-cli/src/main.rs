@@ -27,7 +27,7 @@ use enshell_policy::{
     auto_confirm_allowed, redact_text, redact_value, requires_typed_confirmation, RiskDecision,
     RiskTier,
 };
-use enshell_telemetry::{AuditLog, AuditRecord, StoredEntry};
+use enshell_telemetry::{AuditLog, AuditOutcome, AuditRecord, StoredEntry};
 
 // ---------------------------------------------------------------------------
 // Audit log constants
@@ -222,7 +222,7 @@ fn main() {
                             // User declined — audit as "denied".
                             append_audit_record_raw(audit_record_for_action(
                                 &actionable,
-                                "denied",
+                                AuditOutcome::Denied,
                                 "interactive",
                                 None,
                             ));
@@ -237,7 +237,7 @@ fn main() {
                             // User declined typed phrase — audit as "denied".
                             append_audit_record_raw(audit_record_for_action(
                                 &actionable,
-                                "denied",
+                                AuditOutcome::Denied,
                                 "typed",
                                 None,
                             ));
@@ -283,7 +283,7 @@ fn main() {
                     // Append to the audit log with full redaction; failure is non-fatal.
                     append_audit_record_raw(audit_record_for_action(
                         &actionable,
-                        "ok",
+                        AuditOutcome::Ok,
                         &record.confirmation_mode,
                         record.exit_code,
                     ));
@@ -293,7 +293,7 @@ fn main() {
                 Err(CoreError::ConfirmationRequired) => {
                     append_audit_record_raw(audit_record_for_action(
                         &actionable,
-                        "denied",
+                        AuditOutcome::Denied,
                         &exec_confirmation_mode,
                         None,
                     ));
@@ -303,7 +303,7 @@ fn main() {
                 Err(CoreError::Exec(ExecError::Cancelled)) => {
                     append_audit_record_raw(audit_record_for_action(
                         &actionable,
-                        "aborted",
+                        AuditOutcome::Aborted,
                         &exec_confirmation_mode,
                         None,
                     ));
@@ -313,7 +313,7 @@ fn main() {
                 Err(CoreError::Exec(ExecError::TimedOut)) => {
                     append_audit_record_raw(audit_record_for_action(
                         &actionable,
-                        "aborted",
+                        AuditOutcome::Aborted,
                         &exec_confirmation_mode,
                         None,
                     ));
@@ -323,7 +323,7 @@ fn main() {
                 Err(e) => {
                     append_audit_record_raw(audit_record_for_action(
                         &actionable,
-                        "error",
+                        AuditOutcome::Error,
                         &exec_confirmation_mode,
                         None,
                     ));
@@ -572,12 +572,12 @@ pub fn default_audit_log_path() -> Option<PathBuf> {
 /// `redaction_count` field reflects the total number of secret spans removed.
 ///
 /// # Parameters
-/// - `outcome`: `"ok"` | `"denied"` | `"aborted"` | `"error"`
+/// - `outcome`: the typed [`AuditOutcome`] for this event.
 /// - `confirmation_mode`: `"yes"` | `"interactive"` | `"typed"` | `"none"`
 /// - `exit_code`: `Some(code)` when the process ran to completion; `None` otherwise.
 pub fn audit_record_for_action(
     actionable: &enshell_core::Actionable,
-    outcome: &str,
+    outcome: AuditOutcome,
     confirmation_mode: &str,
     exit_code: Option<i32>,
 ) -> AuditRecord {
@@ -612,7 +612,7 @@ pub fn audit_record_for_action(
         command_plan,
         confirmation_mode: confirmation_mode.to_owned(),
         exit_code,
-        outcome: outcome.to_owned(),
+        outcome,
         redaction_count,
     }
 }
@@ -646,7 +646,7 @@ pub fn audit_record_for_refused(user_request: &str, intent_name: &str) -> AuditR
         command_plan: String::new(),
         confirmation_mode: "none".to_owned(),
         exit_code: None,
-        outcome: "refused".to_owned(),
+        outcome: AuditOutcome::Refused,
         redaction_count,
     }
 }
@@ -780,7 +780,7 @@ pub fn format_history(entries: &[StoredEntry]) -> String {
             r.exit_code
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "—".to_owned()),
-            r.outcome,
+            r.outcome.as_str(),
         ));
         if i + 1 < recent.len() {
             out.push('\n');
@@ -1254,7 +1254,7 @@ mod tests {
     #[test]
     fn audit_record_for_action_maps_fields_correctly() {
         let actionable = make_actionable_find_port();
-        let audit = audit_record_for_action(&actionable, "ok", "yes", Some(0));
+        let audit = audit_record_for_action(&actionable, AuditOutcome::Ok, "yes", Some(0));
 
         assert_eq!(audit.intent, "find_process_using_port");
         assert_eq!(audit.risk_tier, "ReadOnly");
@@ -1262,7 +1262,7 @@ mod tests {
         assert!(!audit.command_plan.is_empty());
         assert_eq!(audit.confirmation_mode, "yes");
         assert_eq!(audit.exit_code, Some(0));
-        assert_eq!(audit.outcome, "ok");
+        assert_eq!(audit.outcome, AuditOutcome::Ok);
         assert_eq!(audit.model_id, "stub");
         assert!(audit.model_quant.is_none());
         assert_eq!(audit.prompt_template_version, "stub-1");
@@ -1281,7 +1281,7 @@ mod tests {
     #[test]
     fn audit_record_for_action_params_are_not_null() {
         let actionable = make_actionable_find_port();
-        let audit = audit_record_for_action(&actionable, "ok", "yes", Some(0));
+        let audit = audit_record_for_action(&actionable, AuditOutcome::Ok, "yes", Some(0));
         // params should be a non-null JSON value (the intent's fields)
         assert!(!audit.params.is_null(), "params should not be null");
     }
@@ -1289,8 +1289,8 @@ mod tests {
     #[test]
     fn audit_record_for_action_denied_outcome() {
         let actionable = make_actionable_find_port();
-        let audit = audit_record_for_action(&actionable, "denied", "interactive", None);
-        assert_eq!(audit.outcome, "denied");
+        let audit = audit_record_for_action(&actionable, AuditOutcome::Denied, "interactive", None);
+        assert_eq!(audit.outcome, AuditOutcome::Denied);
         assert_eq!(audit.confirmation_mode, "interactive");
         assert!(audit.exit_code.is_none());
     }
@@ -1298,16 +1298,16 @@ mod tests {
     #[test]
     fn audit_record_for_action_aborted_outcome() {
         let actionable = make_actionable_find_port();
-        let audit = audit_record_for_action(&actionable, "aborted", "yes", None);
-        assert_eq!(audit.outcome, "aborted");
+        let audit = audit_record_for_action(&actionable, AuditOutcome::Aborted, "yes", None);
+        assert_eq!(audit.outcome, AuditOutcome::Aborted);
         assert!(audit.exit_code.is_none());
     }
 
     #[test]
     fn audit_record_for_action_error_outcome() {
         let actionable = make_actionable_find_port();
-        let audit = audit_record_for_action(&actionable, "error", "yes", None);
-        assert_eq!(audit.outcome, "error");
+        let audit = audit_record_for_action(&actionable, AuditOutcome::Error, "yes", None);
+        assert_eq!(audit.outcome, AuditOutcome::Error);
     }
 
     /// A request containing a GitHub PAT should have the token redacted and
@@ -1324,7 +1324,7 @@ mod tests {
         // through unchanged (no secrets → count 0), and by testing redaction
         // on the refused path (see audit_record_for_refused_redacts_secret).
         let actionable = make_actionable_find_port();
-        let audit = audit_record_for_action(&actionable, "ok", "yes", Some(0));
+        let audit = audit_record_for_action(&actionable, AuditOutcome::Ok, "yes", Some(0));
         // Plain request → no redaction.
         assert_eq!(audit.redaction_count, 0);
         assert_eq!(audit.user_request, "what is using port 3000");
@@ -1349,7 +1349,7 @@ mod tests {
             "token should be absent from stored user_request, got: {}",
             audit.user_request
         );
-        assert_eq!(audit.outcome, "refused");
+        assert_eq!(audit.outcome, AuditOutcome::Refused);
         assert_eq!(audit.confirmation_mode, "none");
         assert!(audit.exit_code.is_none());
         assert!(audit.params.is_null(), "params should be Null for refused");
@@ -1361,7 +1361,7 @@ mod tests {
     #[test]
     fn audit_record_for_refused_plain_request_no_redaction() {
         let audit = audit_record_for_refused("install ripgrep", "install_package");
-        assert_eq!(audit.outcome, "refused");
+        assert_eq!(audit.outcome, AuditOutcome::Refused);
         assert_eq!(audit.redaction_count, 0);
         assert_eq!(audit.user_request, "install ripgrep");
         assert!(audit.params.is_null());
@@ -1372,7 +1372,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_stored_entry(n: u32) -> enshell_telemetry::StoredEntry {
-        use enshell_telemetry::AuditRecord;
+        use enshell_telemetry::{AuditOutcome, AuditRecord};
         enshell_telemetry::StoredEntry {
             record: AuditRecord {
                 correlation_id: format!("corr-{n}"),
@@ -1389,7 +1389,7 @@ mod tests {
                 command_plan: format!("lsof -i :{}", 3000 + n),
                 confirmation_mode: "yes".to_owned(),
                 exit_code: Some(0),
-                outcome: "ok".to_owned(),
+                outcome: AuditOutcome::Ok,
                 redaction_count: 0,
             },
             prev_hash: "0".repeat(64),

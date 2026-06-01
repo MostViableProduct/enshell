@@ -44,6 +44,55 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+// ─── AuditOutcome ─────────────────────────────────────────────────────────────
+
+/// The high-level outcome of an audit event.
+///
+/// Serializes to and deserializes from lowercase strings
+/// (`"ok"`, `"denied"`, `"aborted"`, `"error"`, `"refused"`),
+/// so it is wire-compatible with on-disk JSONL logs that stored those strings.
+///
+/// Variants:
+/// - [`AuditOutcome::Ok`] — the command ran successfully.
+/// - [`AuditOutcome::Denied`] — the user declined the confirmation prompt.
+/// - [`AuditOutcome::Aborted`] — execution was cancelled or timed out.
+/// - [`AuditOutcome::Error`] — execution encountered an unexpected error.
+/// - [`AuditOutcome::Refused`] — the intent was refused by policy before any
+///   execution attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuditOutcome {
+    /// The command ran successfully.
+    Ok,
+    /// The user declined the confirmation prompt.
+    Denied,
+    /// Execution was cancelled or timed out before completion.
+    Aborted,
+    /// Execution encountered an unexpected error.
+    Error,
+    /// The intent was refused by policy before any execution attempt.
+    Refused,
+}
+
+impl AuditOutcome {
+    /// Return the lowercase string label for this outcome, suitable for human display.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuditOutcome::Ok => "ok",
+            AuditOutcome::Denied => "denied",
+            AuditOutcome::Aborted => "aborted",
+            AuditOutcome::Error => "error",
+            AuditOutcome::Refused => "refused",
+        }
+    }
+}
+
+impl std::fmt::Display for AuditOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 // ─── Genesis hash ─────────────────────────────────────────────────────────────
 
 /// The fixed "genesis" `prev_hash` used for the very first entry in a new log.
@@ -90,8 +139,13 @@ pub struct AuditRecord {
     pub confirmation_mode: String,
     /// Process exit code, if the command ran.
     pub exit_code: Option<i32>,
-    /// High-level outcome: `"ok"` | `"denied"` | `"aborted"` | `"error"`.
-    pub outcome: String,
+    /// High-level outcome of this audit event.
+    ///
+    /// See [`AuditOutcome`] for all variants:
+    /// [`Ok`](AuditOutcome::Ok) | [`Denied`](AuditOutcome::Denied) |
+    /// [`Aborted`](AuditOutcome::Aborted) | [`Error`](AuditOutcome::Error) |
+    /// [`Refused`](AuditOutcome::Refused).
+    pub outcome: AuditOutcome,
     /// Number of secret matches redacted from this record before storage.
     pub redaction_count: u32,
 }
@@ -420,7 +474,7 @@ mod tests {
             command_plan: format!("echo {n}"),
             confirmation_mode: "yes".to_string(),
             exit_code: Some(0),
-            outcome: "ok".to_string(),
+            outcome: AuditOutcome::Ok,
             redaction_count: 0,
         }
     }
@@ -493,9 +547,10 @@ mod tests {
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 3);
 
-        // Parse line 2, change `outcome` to "tampered", re-serialize.
-        let mut entry2: StoredEntry = serde_json::from_str(lines[1]).unwrap();
-        entry2.record.outcome = "tampered".to_string();
+        // Parse line 2 as raw JSON, change `outcome` to an unrecognised value,
+        // and re-serialize so the hash still looks intact but the record changed.
+        let mut entry2: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        entry2["record"]["outcome"] = serde_json::json!("tampered");
         let tampered_line = serde_json::to_string(&entry2).unwrap();
 
         let new_content = format!("{}\n{}\n{}\n", lines[0], tampered_line, lines[2]);
@@ -596,7 +651,7 @@ mod tests {
             command_plan: "du -ah /home/user | sort -rh | head -10".to_string(),
             confirmation_mode: "yes".to_string(),
             exit_code: Some(0),
-            outcome: "ok".to_string(),
+            outcome: AuditOutcome::Ok,
             redaction_count: 0,
         };
 
@@ -721,5 +776,77 @@ mod tests {
         log.verify().unwrap();
 
         let _ = std::fs::remove_file(path.as_ref());
+    }
+
+    // ── test: AuditOutcome serializes to lowercase strings ───────────────────
+
+    #[test]
+    fn audit_outcome_serializes_to_lowercase() {
+        assert_eq!(serde_json::to_string(&AuditOutcome::Ok).unwrap(), "\"ok\"");
+        assert_eq!(
+            serde_json::to_string(&AuditOutcome::Denied).unwrap(),
+            "\"denied\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuditOutcome::Aborted).unwrap(),
+            "\"aborted\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuditOutcome::Error).unwrap(),
+            "\"error\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuditOutcome::Refused).unwrap(),
+            "\"refused\""
+        );
+    }
+
+    // ── test: back-compat — old string outcomes deserialize correctly ─────────
+
+    #[test]
+    fn audit_outcome_deserializes_from_old_string_outcomes() {
+        // Simulates an on-disk JSONL entry that stored outcome as a plain string,
+        // written before the enum was introduced.
+        let json_line = r#"{"record":{"correlation_id":"c1","user_request":"r","timestamp":"0","policy_version":1,"intent_schema_version":1,"model_id":"stub","model_quant":null,"prompt_template_version":"v1","intent":"check_system_health","params":{},"risk_tier":"read_only","command_plan":"echo 1","confirmation_mode":"yes","exit_code":0,"outcome":"refused","redaction_count":0},"prev_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"aaaa"}"#;
+        let entry: StoredEntry = serde_json::from_str(json_line).unwrap();
+        assert_eq!(
+            entry.record.outcome,
+            AuditOutcome::Refused,
+            "\"refused\" string must deserialize to AuditOutcome::Refused"
+        );
+
+        // Check all five legacy strings round-trip correctly.
+        for (s, expected) in [
+            ("ok", AuditOutcome::Ok),
+            ("denied", AuditOutcome::Denied),
+            ("aborted", AuditOutcome::Aborted),
+            ("error", AuditOutcome::Error),
+            ("refused", AuditOutcome::Refused),
+        ] {
+            let outcome: AuditOutcome = serde_json::from_str(&format!("\"{s}\""))
+                .unwrap_or_else(|e| panic!("failed to deserialize \"{s}\": {e}"));
+            assert_eq!(outcome, expected, "mismatch for \"{s}\"");
+        }
+    }
+
+    // ── test: AuditOutcome as_str and Display ─────────────────────────────────
+
+    #[test]
+    fn audit_outcome_as_str_and_display() {
+        let cases = [
+            (AuditOutcome::Ok, "ok"),
+            (AuditOutcome::Denied, "denied"),
+            (AuditOutcome::Aborted, "aborted"),
+            (AuditOutcome::Error, "error"),
+            (AuditOutcome::Refused, "refused"),
+        ];
+        for (variant, label) in cases {
+            assert_eq!(variant.as_str(), label, "as_str mismatch for {variant:?}");
+            assert_eq!(
+                format!("{variant}"),
+                label,
+                "Display mismatch for {variant:?}"
+            );
+        }
     }
 }
