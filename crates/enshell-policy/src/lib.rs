@@ -24,6 +24,16 @@
 //!
 //! The helpers [`auto_confirm_allowed`], [`requires_typed_confirmation`], and
 //! [`is_mvp_executable`] encode this invariant.
+//!
+//! # Secret redaction
+//!
+//! Before persisting user-supplied text to audit logs or model-context captures,
+//! callers should run it through [`redact_text`] or [`redact_value`] from the
+//! [`redact`] module.  These functions replace secret-looking substrings with the
+//! `«redacted»` marker using conservative, std-only heuristics.
+
+pub mod redact;
+pub use redact::{redact_text, redact_value};
 
 use enshell_intents::Intent;
 

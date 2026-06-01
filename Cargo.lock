@@ -261,6 +261,7 @@ name = "enshell-policy"
 version = "0.0.0"
 dependencies = [
  "enshell-intents",
+ "serde_json",
 ]
 
 [[package]]
