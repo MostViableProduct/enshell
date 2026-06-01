@@ -8,6 +8,8 @@ rust-version.workspace = true
 
 [dev-dependencies]
 enshell-adapters = { path = "../enshell-adapters" }
+enshell-core = { path = "../enshell-core" }
 enshell-intents = { path = "../enshell-intents" }
+enshell-model = { path = "../enshell-model" }
 enshell-os = { path = "../enshell-os" }
 enshell-policy = { path = "../enshell-policy" }
