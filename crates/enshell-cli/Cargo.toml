@@ -9,3 +9,12 @@ rust-version.workspace = true
 [[bin]]
 name = "enshell"
 path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
+ctrlc = "3.5.2"
+enshell-core = { version = "0.0.0", path = "../enshell-core" }
+enshell-intents = { version = "0.0.0", path = "../enshell-intents" }
+enshell-model = { version = "0.0.0", path = "../enshell-model" }
+enshell-os = { version = "0.0.0", path = "../enshell-os" }
+enshell-policy = { version = "0.0.0", path = "../enshell-policy" }
