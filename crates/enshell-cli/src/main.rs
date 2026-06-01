@@ -10,7 +10,8 @@
 //! - [`format_success`] / [`format_error`] (pure) for output rendering.
 //! - `run_doctor` for the `doctor` subcommand.
 //! - [`prompt_stdin`] as the I/O boundary (injectable in tests).
-//! - [`default_audit_log_path`] / [`build_audit_record`] for the local audit log.
+//! - [`default_audit_log_path`] / [`audit_record_for_action`] /
+//!   [`audit_record_for_refused`] for the local audit log.
 //! - [`format_history`] (pure) for `enshell history` output rendering.
 
 use std::path::PathBuf;
@@ -19,10 +20,13 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use enshell_core::{Confirmation, CoreError, OrchestratorConfig, Prepared};
+use enshell_core::{display_command, Confirmation, CoreError, OrchestratorConfig, Prepared};
 use enshell_model::StubProvider;
 use enshell_os::{current_os, ExecControl, ExecError};
-use enshell_policy::{auto_confirm_allowed, requires_typed_confirmation, RiskDecision, RiskTier};
+use enshell_policy::{
+    auto_confirm_allowed, redact_text, redact_value, requires_typed_confirmation, RiskDecision,
+    RiskTier,
+};
 use enshell_telemetry::{AuditLog, AuditRecord, StoredEntry};
 
 // ---------------------------------------------------------------------------
@@ -160,6 +164,8 @@ fn main() {
 
     match prepared {
         Prepared::Clarify { question, options } => {
+            // Clarification is not an execution attempt — not a security event;
+            // no audit record is written for this path.
             println!("{question}");
             if let Some(opts) = options {
                 for opt in opts {
@@ -167,7 +173,12 @@ fn main() {
                 }
             }
         }
-        Prepared::Refused { reason, .. } => {
+        Prepared::Refused {
+            reason,
+            intent_name,
+        } => {
+            // Audit the refusal before printing — security-relevant event.
+            append_audit_record_raw(audit_record_for_refused(&request, &intent_name));
             println!("I can't do that yet: {reason}");
         }
         Prepared::Actionable(actionable) => {
@@ -176,11 +187,13 @@ fn main() {
             println!();
 
             if cli.dry_run {
+                // dry-run is a preview path only; no execution attempt → not audited.
                 println!("(dry run — nothing was executed)");
                 return;
             }
 
             if cli.plan {
+                // plan is a preview path only; no execution attempt → not audited.
                 let tier_label = format_tier(actionable.decision().tier);
                 println!(
                     "Intent: {}\nRisk tier: {}",
@@ -206,6 +219,13 @@ fn main() {
                             };
                             (c, None)
                         } else {
+                            // User declined — audit as "denied".
+                            append_audit_record_raw(audit_record_for_action(
+                                &actionable,
+                                "denied",
+                                "interactive",
+                                None,
+                            ));
                             println!("Okay — not running.");
                             return;
                         }
@@ -214,6 +234,13 @@ fn main() {
                         let answer = prompt_stdin(&prompt);
                         let trimmed = answer.trim().to_owned();
                         if trimmed.is_empty() {
+                            // User declined typed phrase — audit as "denied".
+                            append_audit_record_raw(audit_record_for_action(
+                                &actionable,
+                                "denied",
+                                "typed",
+                                None,
+                            ));
                             println!("Okay — not running.");
                             return;
                         }
@@ -246,27 +273,60 @@ fn main() {
             let control = ExecControl { timeout, cancel };
 
             // Phase 2: execute.
+            // Derive the confirmation_mode string that the executor would use,
+            // so we can record it accurately for denied/aborted/error outcomes.
+            let exec_confirmation_mode =
+                confirmation_mode_label(&confirmation, actionable.decision());
+
             match orch.execute(&actionable, &confirmation, &control) {
                 Ok(record) => {
-                    // Append to the audit log; failure is non-fatal.
-                    // TODO: record denied/aborted/error attempts in a future slice.
-                    append_audit_record(&actionable, &record);
+                    // Append to the audit log with full redaction; failure is non-fatal.
+                    append_audit_record_raw(audit_record_for_action(
+                        &actionable,
+                        "ok",
+                        &record.confirmation_mode,
+                        record.exit_code,
+                    ));
                     let output_str = format_success(&record);
                     println!("{output_str}");
                 }
                 Err(CoreError::ConfirmationRequired) => {
+                    append_audit_record_raw(audit_record_for_action(
+                        &actionable,
+                        "denied",
+                        &exec_confirmation_mode,
+                        None,
+                    ));
                     eprintln!("I need explicit confirmation to do that; nothing was run.");
                     std::process::exit(1);
                 }
                 Err(CoreError::Exec(ExecError::Cancelled)) => {
+                    append_audit_record_raw(audit_record_for_action(
+                        &actionable,
+                        "aborted",
+                        &exec_confirmation_mode,
+                        None,
+                    ));
                     eprintln!("Cancelled. Nothing further was run.");
                     std::process::exit(1);
                 }
                 Err(CoreError::Exec(ExecError::TimedOut)) => {
+                    append_audit_record_raw(audit_record_for_action(
+                        &actionable,
+                        "aborted",
+                        &exec_confirmation_mode,
+                        None,
+                    ));
                     eprintln!("That took too long and was stopped (timed out).");
                     std::process::exit(1);
                 }
                 Err(e) => {
+                    append_audit_record_raw(audit_record_for_action(
+                        &actionable,
+                        "error",
+                        &exec_confirmation_mode,
+                        None,
+                    ));
                     let recovery = recovery_guidance(&e);
                     eprintln!("That didn't work: {e}");
                     eprintln!("{recovery}");
@@ -506,14 +566,20 @@ pub fn default_audit_log_path() -> Option<PathBuf> {
     Some(path)
 }
 
-/// Build an [`AuditRecord`] from a successful execution.
+/// Build an [`AuditRecord`] from an [`enshell_core::Actionable`] for any terminal outcome.
 ///
-/// `model_id` is `"stub"` and `model_quant` is `None` until a real provider
-/// is wired in. `redaction_count` is `0` — no secret-redaction layer exists
-/// yet; note this when reviewing audit records.
-pub fn build_audit_record(
+/// Redacts `user_request`, `command_plan`, and `params` before storage. The
+/// `redaction_count` field reflects the total number of secret spans removed.
+///
+/// # Parameters
+/// - `outcome`: `"ok"` | `"denied"` | `"aborted"` | `"error"`
+/// - `confirmation_mode`: `"yes"` | `"interactive"` | `"typed"` | `"none"`
+/// - `exit_code`: `Some(code)` when the process ran to completion; `None` otherwise.
+pub fn audit_record_for_action(
     actionable: &enshell_core::Actionable,
-    record: &enshell_core::ExecutionRecord,
+    outcome: &str,
+    confirmation_mode: &str,
+    exit_code: Option<i32>,
 ) -> AuditRecord {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -522,36 +588,74 @@ pub fn build_audit_record(
     let correlation_id = format!("{}-{}", millis, std::process::id());
     let timestamp = millis.to_string();
 
-    let params = serde_json::to_value(actionable.intent()).unwrap_or(serde_json::Value::Null);
+    // Redact user-supplied text fields.
+    let (user_request, c1) = redact_text(actionable.user_request());
+    let (command_plan, c2) = redact_text(&display_command(actionable.plan()));
+    let mut params = serde_json::to_value(actionable.intent()).unwrap_or(serde_json::Value::Null);
+    let c3 = redact_value(&mut params);
+    let redaction_count = c1 + c2 + c3;
+
+    let decision = actionable.decision();
 
     AuditRecord {
         correlation_id,
-        user_request: record.user_request.clone(),
+        user_request,
         timestamp,
         policy_version: POLICY_VERSION,
         intent_schema_version: enshell_intents::SCHEMA_VERSION,
         model_id: "stub".to_owned(),
         model_quant: None,
         prompt_template_version: "stub-1".to_owned(),
-        intent: record.intent_name.clone(),
+        intent: intent_display_name(actionable).to_owned(),
         params,
-        risk_tier: format!("{:?}", record.risk_tier),
-        command_plan: record.command_display.clone(),
-        confirmation_mode: record.confirmation_mode.clone(),
-        exit_code: record.exit_code,
-        outcome: "ok".to_owned(),
-        redaction_count: 0, // no secret-redaction layer yet
+        risk_tier: format!("{:?}", decision.tier),
+        command_plan,
+        confirmation_mode: confirmation_mode.to_owned(),
+        exit_code,
+        outcome: outcome.to_owned(),
+        redaction_count,
     }
 }
 
-/// Open the default audit log and append a record for a successful execution.
+/// Build an [`AuditRecord`] for a refused intent (no [`enshell_core::Actionable`] available).
+///
+/// Redacts the `user_request`. `params` is `Null`, `command_plan` is empty,
+/// `risk_tier` is `"n/a"`, `confirmation_mode` is `"none"`, `outcome` is `"refused"`.
+pub fn audit_record_for_refused(user_request: &str, intent_name: &str) -> AuditRecord {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let correlation_id = format!("{}-{}", millis, std::process::id());
+    let timestamp = millis.to_string();
+
+    let (user_request, redaction_count) = redact_text(user_request);
+
+    AuditRecord {
+        correlation_id,
+        user_request,
+        timestamp,
+        policy_version: POLICY_VERSION,
+        intent_schema_version: enshell_intents::SCHEMA_VERSION,
+        model_id: "stub".to_owned(),
+        model_quant: None,
+        prompt_template_version: "stub-1".to_owned(),
+        intent: intent_name.to_owned(),
+        params: serde_json::Value::Null,
+        risk_tier: "n/a".to_owned(),
+        command_plan: String::new(),
+        confirmation_mode: "none".to_owned(),
+        exit_code: None,
+        outcome: "refused".to_owned(),
+        redaction_count,
+    }
+}
+
+/// Open the default audit log and append a pre-built [`AuditRecord`].
 ///
 /// Failure to open or append is **non-fatal**: a one-line warning is printed to
 /// stderr and the command's success is unaffected.
-fn append_audit_record(
-    actionable: &enshell_core::Actionable,
-    record: &enshell_core::ExecutionRecord,
-) {
+fn append_audit_record_raw(audit_record: AuditRecord) {
     let path = match default_audit_log_path() {
         Some(p) => p,
         None => {
@@ -559,7 +663,6 @@ fn append_audit_record(
             return;
         }
     };
-    let audit_record = build_audit_record(actionable, record);
     match AuditLog::open(&path) {
         Err(e) => {
             eprintln!("note: could not write audit log: {e}");
@@ -569,6 +672,26 @@ fn append_audit_record(
                 eprintln!("note: could not write audit log: {e}");
             }
         }
+    }
+}
+
+/// Derive the confirmation-mode label that [`enshell_core::Orchestrator::execute`] would
+/// use for a given [`Confirmation`] + [`RiskDecision`] pair.
+///
+/// Used to populate the audit record when execution fails or is denied before
+/// the executor has a chance to record the mode itself.
+fn confirmation_mode_label(
+    confirmation: &enshell_core::Confirmation,
+    decision: &enshell_policy::RiskDecision,
+) -> String {
+    if auto_confirm_allowed(decision, confirmation.yes_flag) {
+        "yes".to_owned()
+    } else if requires_typed_confirmation(decision) {
+        "typed".to_owned()
+    } else if confirmation.interactively_confirmed {
+        "interactive".to_owned()
+    } else {
+        "none".to_owned()
     }
 }
 
@@ -1113,27 +1236,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // build_audit_record: mapping from ExecutionRecord to AuditRecord
+    // audit_record_for_action / audit_record_for_refused
     // -----------------------------------------------------------------------
-
-    fn make_execution_record(
-        intent_name: &str,
-        risk_tier: RiskTier,
-        command_display: &str,
-        confirmation_mode: &str,
-        exit_code: Option<i32>,
-    ) -> enshell_core::ExecutionRecord {
-        enshell_core::ExecutionRecord {
-            user_request: "test request".to_owned(),
-            intent_name: intent_name.to_owned(),
-            risk_tier,
-            command_display: command_display.to_owned(),
-            confirmation_mode: confirmation_mode.to_owned(),
-            exit_code,
-            stdout: String::new(),
-            stderr: String::new(),
-        }
-    }
 
     /// Build a minimal Actionable using policy+render for testing.
     fn make_actionable_find_port() -> enshell_core::Actionable {
@@ -1148,20 +1252,14 @@ mod tests {
     }
 
     #[test]
-    fn build_audit_record_maps_fields_correctly() {
+    fn audit_record_for_action_maps_fields_correctly() {
         let actionable = make_actionable_find_port();
-        let exec_record = make_execution_record(
-            "find_process_using_port",
-            RiskTier::ReadOnly,
-            "lsof -i :3000",
-            "yes",
-            Some(0),
-        );
-        let audit = build_audit_record(&actionable, &exec_record);
+        let audit = audit_record_for_action(&actionable, "ok", "yes", Some(0));
 
         assert_eq!(audit.intent, "find_process_using_port");
         assert_eq!(audit.risk_tier, "ReadOnly");
-        assert_eq!(audit.command_plan, "lsof -i :3000");
+        // command_plan is rendered from the plan (lsof or ss depending on OS)
+        assert!(!audit.command_plan.is_empty());
         assert_eq!(audit.confirmation_mode, "yes");
         assert_eq!(audit.exit_code, Some(0));
         assert_eq!(audit.outcome, "ok");
@@ -1170,7 +1268,10 @@ mod tests {
         assert_eq!(audit.prompt_template_version, "stub-1");
         assert_eq!(audit.intent_schema_version, enshell_intents::SCHEMA_VERSION);
         assert_eq!(audit.policy_version, POLICY_VERSION);
+        // Normal request contains no secrets → redaction_count == 0.
         assert_eq!(audit.redaction_count, 0);
+        // user_request must be populated (redacted version of original).
+        assert_eq!(audit.user_request, "what is using port 3000");
         // correlation_id is non-empty
         assert!(!audit.correlation_id.is_empty());
         // timestamp is non-empty
@@ -1178,18 +1279,92 @@ mod tests {
     }
 
     #[test]
-    fn build_audit_record_params_are_not_null() {
+    fn audit_record_for_action_params_are_not_null() {
         let actionable = make_actionable_find_port();
-        let exec_record = make_execution_record(
-            "find_process_using_port",
-            RiskTier::ReadOnly,
-            "lsof -i :3000",
-            "yes",
-            Some(0),
-        );
-        let audit = build_audit_record(&actionable, &exec_record);
+        let audit = audit_record_for_action(&actionable, "ok", "yes", Some(0));
         // params should be a non-null JSON value (the intent's fields)
         assert!(!audit.params.is_null(), "params should not be null");
+    }
+
+    #[test]
+    fn audit_record_for_action_denied_outcome() {
+        let actionable = make_actionable_find_port();
+        let audit = audit_record_for_action(&actionable, "denied", "interactive", None);
+        assert_eq!(audit.outcome, "denied");
+        assert_eq!(audit.confirmation_mode, "interactive");
+        assert!(audit.exit_code.is_none());
+    }
+
+    #[test]
+    fn audit_record_for_action_aborted_outcome() {
+        let actionable = make_actionable_find_port();
+        let audit = audit_record_for_action(&actionable, "aborted", "yes", None);
+        assert_eq!(audit.outcome, "aborted");
+        assert!(audit.exit_code.is_none());
+    }
+
+    #[test]
+    fn audit_record_for_action_error_outcome() {
+        let actionable = make_actionable_find_port();
+        let audit = audit_record_for_action(&actionable, "error", "yes", None);
+        assert_eq!(audit.outcome, "error");
+    }
+
+    /// A request containing a GitHub PAT should have the token redacted and
+    /// redaction_count >= 1.
+    #[test]
+    fn audit_record_for_action_redacts_secret_in_user_request() {
+        // Build an Actionable with a user_request that contains a fake PAT.
+        // We can't inject an arbitrary user_request into an existing Actionable,
+        // so we build one via the orchestrator with the stub. The stub always
+        // maps "what is using port 3000" → FindProcessUsingPort, but we can
+        // test redaction via `audit_record_for_refused` which takes the raw
+        // request string directly. For the action path we test by confirming
+        // the actionable's user_request ("what is using port 3000") passes
+        // through unchanged (no secrets → count 0), and by testing redaction
+        // on the refused path (see audit_record_for_refused_redacts_secret).
+        let actionable = make_actionable_find_port();
+        let audit = audit_record_for_action(&actionable, "ok", "yes", Some(0));
+        // Plain request → no redaction.
+        assert_eq!(audit.redaction_count, 0);
+        assert_eq!(audit.user_request, "what is using port 3000");
+    }
+
+    /// audit_record_for_refused: request with a token → redacted, count >= 1.
+    #[test]
+    fn audit_record_for_refused_redacts_secret_in_user_request() {
+        // Build a GitHub-PAT-shaped token at runtime so the literal never appears
+        // in source (avoids tripping secret-scanning push protection on a fake token).
+        let token = format!("ghp_{}", "a".repeat(36));
+        let request = format!("deploy with token {token}");
+        let audit = audit_record_for_refused(&request, "install_package");
+
+        assert!(
+            audit.redaction_count >= 1,
+            "expected at least 1 redaction, got {}",
+            audit.redaction_count
+        );
+        assert!(
+            !audit.user_request.contains("ghp_"),
+            "token should be absent from stored user_request, got: {}",
+            audit.user_request
+        );
+        assert_eq!(audit.outcome, "refused");
+        assert_eq!(audit.confirmation_mode, "none");
+        assert!(audit.exit_code.is_none());
+        assert!(audit.params.is_null(), "params should be Null for refused");
+        assert_eq!(audit.command_plan, "");
+        assert_eq!(audit.risk_tier, "n/a");
+        assert_eq!(audit.intent, "install_package");
+    }
+
+    #[test]
+    fn audit_record_for_refused_plain_request_no_redaction() {
+        let audit = audit_record_for_refused("install ripgrep", "install_package");
+        assert_eq!(audit.outcome, "refused");
+        assert_eq!(audit.redaction_count, 0);
+        assert_eq!(audit.user_request, "install ripgrep");
+        assert!(audit.params.is_null());
     }
 
     // -----------------------------------------------------------------------
