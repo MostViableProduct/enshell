@@ -27,9 +27,18 @@
 //! ```json
 //! {"record":{...},"prev_hash":"<64 hex chars>","hash":"<64 hex chars>"}
 //! ```
+//!
+//! # Concurrency
+//!
+//! [`AuditLog::append`] serializes the read-last-hash + write under an
+//! **exclusive** advisory file lock (via [`std::fs::File::lock`], which is
+//! backed by `flock(2)` on Unix and `LockFileEx` on Windows).
+//! [`AuditLog::entries`] and [`AuditLog::verify`] hold a **shared** advisory
+//! lock while reading, so a reader never observes a half-written final line.
+//! Both locks are released when the [`std::fs::File`] guard is dropped.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write as IoWrite};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -105,7 +114,7 @@ pub struct StoredEntry {
 /// Errors produced by [`AuditLog`] operations.
 #[derive(Debug)]
 pub enum AuditError {
-    /// I/O failure (file read, write, directory creation, …).
+    /// I/O failure (file read, write, directory creation, lock acquisition, …).
     Io(io::Error),
     /// JSON serialization or deserialization failure.
     Serde(serde_json::Error),
@@ -154,6 +163,19 @@ impl From<serde_json::Error> for AuditError {
 /// The log is designed for local use at human-terminal scale (thousands of
 /// entries, not millions). All reads load the entire file; no indexing is
 /// performed.
+///
+/// ## Concurrency
+///
+/// Multiple processes (or threads each holding their own [`AuditLog`]) can
+/// safely call [`append`](AuditLog::append), [`entries`](AuditLog::entries),
+/// and [`verify`](AuditLog::verify) concurrently. Each operation acquires an
+/// advisory file lock for its duration:
+///
+/// - `append` holds an **exclusive** lock covering both the read of the last
+///   hash and the write of the new line, so two concurrent appends cannot
+///   interleave and corrupt the chain.
+/// - `entries` and `verify` hold a **shared** lock while reading, so a reader
+///   never sees a half-written final line.
 pub struct AuditLog {
     path: PathBuf,
 }
@@ -178,16 +200,36 @@ impl AuditLog {
 
     /// Append `record` to the log.
     ///
-    /// Reads the last line to obtain the previous hash (or uses the genesis
-    /// hash for an empty log). Computes the new hash as
-    /// `SHA-256(prev_hash_utf8 || canonical_json(record))`, then writes one
-    /// JSON line.
+    /// Acquires an **exclusive** advisory lock on the log file, then reads the
+    /// current last hash (or uses the genesis hash for an empty log), computes
+    /// `SHA-256(prev_hash_utf8 || canonical_json(record))`, writes one JSON
+    /// line, flushes, and releases the lock by dropping the file handle.
+    ///
+    /// The lock ensures that two concurrent callers cannot both read the same
+    /// `prev_hash` and then both append with that same value, which would fork
+    /// the chain and cause a later [`verify`](AuditLog::verify) to fail.
     ///
     /// Returns the hex-encoded hash of the new entry.
     pub fn append(&self, record: &AuditRecord) -> Result<String, AuditError> {
-        let prev_hash = self.last_hash()?;
-        let hash = compute_hash(&prev_hash, record)?;
+        // Open for read + write so we can both seek-to-end and read the file
+        // under the same file description (and therefore the same lock).
+        // `.truncate(false)` is explicit: we are appending, not overwriting.
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.path)?;
 
+        // Acquire exclusive lock — blocks until no other holder.
+        // The lock is released when `file` is dropped at the end of this scope.
+        file.lock()?;
+
+        // Read the last hash while holding the lock.
+        let prev_hash = last_hash_from_file(&file)?;
+
+        // Compute the new entry.
+        let hash = compute_hash(&prev_hash, record)?;
         let entry = StoredEntry {
             record: record.clone(),
             prev_hash,
@@ -196,34 +238,28 @@ impl AuditLog {
         let mut line = serde_json::to_string(&entry)?;
         line.push('\n');
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        // Seek to end and write; then flush before the lock drops.
+        let mut file = file;
+        file.seek(SeekFrom::End(0))?;
         file.write_all(line.as_bytes())?;
+        file.flush()?;
+
+        // `file` drops here → OS releases the exclusive lock.
         Ok(hash)
     }
 
     /// Read all stored entries in insertion order.
+    ///
+    /// Acquires a **shared** advisory lock while reading so that a concurrent
+    /// [`append`](AuditLog::append) cannot be observed mid-write.
     pub fn entries(&self) -> Result<Vec<StoredEntry>, AuditError> {
         let file = File::open(&self.path)?;
-        let reader = BufReader::new(file);
-        let mut entries = Vec::new();
-        for (line_num, line) in reader.lines().enumerate() {
-            let line = line?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let entry: StoredEntry = serde_json::from_str(trimmed).map_err(|e| {
-                AuditError::Corrupt(format!(
-                    "line {} cannot be parsed as StoredEntry: {e}",
-                    line_num + 1
-                ))
-            })?;
-            entries.push(entry);
-        }
-        Ok(entries)
+        file.lock_shared()?;
+        // Lock is held for the lifetime of `file`; released on drop.
+        let result = read_entries_from_file(&file);
+        // Explicit unlock before drop to surface any error (optional but clean).
+        let _ = file.unlock();
+        result
     }
 
     /// Verify the integrity of the hash chain.
@@ -236,8 +272,14 @@ impl AuditLog {
     ///
     /// Returns `Ok(())` if the chain is intact, or `Err(AuditError::Corrupt(_))`
     /// naming the first bad line number.
+    ///
+    /// Acquires a **shared** advisory lock while reading.
     pub fn verify(&self) -> Result<(), AuditError> {
-        let entries = self.entries()?;
+        let file = File::open(&self.path)?;
+        file.lock_shared()?;
+        let entries = read_entries_from_file(&file)?;
+        let _ = file.unlock();
+
         let mut expected_prev = GENESIS_HASH.to_string();
 
         for (idx, entry) in entries.iter().enumerate() {
@@ -266,36 +308,63 @@ impl AuditLog {
         }
         Ok(())
     }
+}
 
-    // ── Private helpers ───────────────────────────────────────────────────────
+// ─── Private helpers ──────────────────────────────────────────────────────────
 
-    /// Read the `hash` field of the last non-empty line, or return the genesis
-    /// hash if the file is empty.
-    fn last_hash(&self) -> Result<String, AuditError> {
-        let file = File::open(&self.path)?;
-        let reader = BufReader::new(file);
-        let mut last: Option<String> = None;
-        for line in reader.lines() {
-            let line = line?;
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                last = Some(trimmed.to_string());
-            }
+/// Read all non-empty lines from `file` (rewound to position 0) and parse each
+/// as a [`StoredEntry`].
+///
+/// The caller is responsible for holding an appropriate lock before calling
+/// this function.
+fn read_entries_from_file(file: &File) -> Result<Vec<StoredEntry>, AuditError> {
+    // We need a fresh read cursor; create a separate file handle by re-opening
+    // via BufReader over a reference (File implements Read via &File on Unix).
+    let reader = BufReader::new(file);
+    let mut entries = Vec::new();
+    for (line_num, line) in reader.lines().enumerate() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
         }
-        match last {
-            None => Ok(GENESIS_HASH.to_string()),
-            Some(json) => {
-                // We only need the `hash` field; parse just enough.
-                let v: serde_json::Value = serde_json::from_str(&json)?;
-                let hash = v
-                    .get("hash")
-                    .and_then(|h| h.as_str())
-                    .ok_or_else(|| {
-                        AuditError::Corrupt("last line is missing the `hash` field".to_string())
-                    })?
-                    .to_string();
-                Ok(hash)
-            }
+        let entry: StoredEntry = serde_json::from_str(trimmed).map_err(|e| {
+            AuditError::Corrupt(format!(
+                "line {} cannot be parsed as StoredEntry: {e}",
+                line_num + 1
+            ))
+        })?;
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+/// Read the `hash` field of the last non-empty line from `file` (read from its
+/// current position), or return the genesis hash if the file is empty.
+///
+/// The caller is responsible for holding an exclusive lock before calling this.
+fn last_hash_from_file(file: &File) -> Result<String, AuditError> {
+    let reader = BufReader::new(file);
+    let mut last: Option<String> = None;
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            last = Some(trimmed.to_string());
+        }
+    }
+    match last {
+        None => Ok(GENESIS_HASH.to_string()),
+        Some(json) => {
+            let v: serde_json::Value = serde_json::from_str(&json)?;
+            let hash = v
+                .get("hash")
+                .and_then(|h| h.as_str())
+                .ok_or_else(|| {
+                    AuditError::Corrupt("last line is missing the `hash` field".to_string())
+                })?
+                .to_string();
+            Ok(hash)
         }
     }
 }
@@ -325,6 +394,7 @@ fn compute_hash(prev_hash: &str, record: &AuditRecord) -> Result<String, AuditEr
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -597,5 +667,59 @@ mod tests {
         // Must be a 64-char hex string.
         assert_eq!(h1.len(), 64);
         assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── test: concurrent appends produce a valid, unforked chain ─────────────
+
+    /// Spawns 8 threads, each opening the SAME log path via `AuditLog::open`
+    /// and appending 10 records. After all threads join:
+    /// - `verify()` must return `Ok(())` (no forked or broken chain).
+    /// - `entries().len()` must equal 80 (no lost writes).
+    ///
+    /// Because `flock(2)` / `LockFileEx` is per open-file-description,
+    /// each thread's separate `AuditLog::open` call creates a distinct fd,
+    /// and the exclusive lock in `append` serializes them correctly.
+    #[test]
+    fn concurrent_appends_produce_valid_chain() {
+        const THREADS: u32 = 8;
+        const APPENDS_PER_THREAD: u32 = 10;
+
+        let path = Arc::new(temp_path("concurrent"));
+        let _ = std::fs::remove_file(path.as_ref());
+
+        // Ensure the file exists before threads start.
+        AuditLog::open(path.as_ref()).unwrap();
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let path = Arc::clone(&path);
+                std::thread::spawn(move || {
+                    // Each thread opens its own AuditLog (→ its own fd).
+                    let log = AuditLog::open(path.as_ref()).unwrap();
+                    for i in 0..APPENDS_PER_THREAD {
+                        let record_id = t * APPENDS_PER_THREAD + i;
+                        log.append(&make_record(record_id)).unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let log = AuditLog::open(path.as_ref()).unwrap();
+
+        let entry_count = log.entries().unwrap().len();
+        assert_eq!(
+            entry_count,
+            (THREADS * APPENDS_PER_THREAD) as usize,
+            "expected {} entries, found {entry_count}",
+            THREADS * APPENDS_PER_THREAD
+        );
+
+        log.verify().unwrap();
+
+        let _ = std::fs::remove_file(path.as_ref());
     }
 }
