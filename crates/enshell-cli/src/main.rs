@@ -58,7 +58,7 @@ pub struct Cli {
     pub request: Option<String>,
 
     /// Show the full plan and command — do NOT execute anything.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "plan")]
     pub dry_run: bool,
 
     /// Show the structured intent name and risk tier — do NOT execute anything.
@@ -227,13 +227,21 @@ fn main() {
                 };
             let _: Option<String> = prompted_output; // nothing buffered
 
-            // Ctrl-C wiring.
+            // Ctrl-C wiring: flip the cancel flag so the executor stops and
+            // reaps child processes gracefully. If the handler can't be installed
+            // we warn (the default SIGINT still terminates the process, but
+            // without our graceful child-cleanup), rather than failing closed —
+            // the wall-clock timeout still bounds the run regardless.
             let cancel = Arc::new(AtomicBool::new(false));
             let cancel_clone = cancel.clone();
-            // Best-effort: if setting the handler fails, continue without it.
-            let _ = ctrlc::set_handler(move || {
+            if let Err(e) = ctrlc::set_handler(move || {
                 cancel_clone.store(true, Ordering::Relaxed);
-            });
+            }) {
+                eprintln!(
+                    "note: could not install the Ctrl-C handler ({e}); \
+                     press Ctrl-C will still stop enShell, but child cleanup may be abrupt."
+                );
+            }
 
             let control = ExecControl { timeout, cancel };
 
@@ -793,6 +801,16 @@ mod tests {
     // -----------------------------------------------------------------------
     // clap parsing tests
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn dry_run_and_plan_conflict() {
+        // --dry-run and --plan are mutually exclusive; clap must reject both.
+        let result = Cli::try_parse_from(["enshell", "--dry-run", "--plan", "x"]);
+        assert!(
+            result.is_err(),
+            "--dry-run and --plan together should be a clap error, not silent precedence"
+        );
+    }
 
     #[test]
     fn parse_dry_run_with_request() {
