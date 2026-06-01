@@ -74,6 +74,13 @@ pub fn redact_text(input: &str) -> (String, u32) {
 /// string leaf. Object values and array elements are visited recursively.
 /// Non-string leaves (numbers, bools, null) are untouched.
 ///
+/// **Key-aware:** within an object, if a key is sensitive (e.g. `password`,
+/// `token`, `api_key` — the crate's configured sensitive-key list) and its
+/// value is a string, the whole value is redacted even if it does not itself
+/// match a token pattern
+/// (a bare `{"password": "plainsecret"}` is caught). Values under non-sensitive
+/// keys are still scanned for inline secrets as usual.
+///
 /// Returns the total number of redactions performed across all leaves.
 pub fn redact_value(value: &mut Value) -> u32 {
     match value {
@@ -83,10 +90,33 @@ pub fn redact_value(value: &mut Value) -> u32 {
             count
         }
         Value::Array(arr) => arr.iter_mut().map(redact_value).sum(),
-        Value::Object(map) => map.values_mut().map(redact_value).sum(),
+        Value::Object(map) => {
+            let mut count = 0;
+            for (key, val) in map.iter_mut() {
+                // Key-aware: a sensitive key with a (non-empty, not-already-
+                // redacted) string value → redact the whole value.
+                if is_sensitive_key(key) {
+                    if let Value::String(s) = val {
+                        if !s.is_empty() && s != MARKER {
+                            *s = MARKER.to_string();
+                            count += 1;
+                            continue;
+                        }
+                    }
+                }
+                count += redact_value(val);
+            }
+            count
+        }
         // Numbers, bools, null — untouched
         _ => 0,
     }
+}
+
+/// True if `key` (case-insensitive) is one of the [`SENSITIVE_KEYS`].
+fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    SENSITIVE_KEYS.contains(&lower.as_str())
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +748,37 @@ mod tests {
     }
 
     #[test]
+    fn redact_value_key_aware_redacts_plain_value_under_sensitive_key() {
+        // The value "plainsecret" matches no token pattern, but its key is
+        // sensitive, so it must still be redacted.
+        let mut val = json!({
+            "username": "alice",
+            "password": "plainsecret",
+            "Api_Key": "anothervalue",   // case-insensitive key match
+            "port": 3000,
+        });
+        let count = redact_value(&mut val);
+        assert_eq!(count, 2, "password and Api_Key values should be redacted");
+        assert_eq!(
+            val["username"],
+            json!("alice"),
+            "non-sensitive key untouched"
+        );
+        assert_eq!(val["port"], json!(3000), "numbers untouched");
+        assert_eq!(val["password"].as_str(), Some(MARKER));
+        assert_eq!(val["Api_Key"].as_str(), Some(MARKER));
+    }
+
+    #[test]
+    fn redact_value_non_sensitive_keys_with_plain_values_untouched() {
+        let mut val = json!({ "path": "/Users/me/Downloads", "limit": 10, "name": "report" });
+        let count = redact_value(&mut val);
+        assert_eq!(count, 0);
+        assert_eq!(val["path"], json!("/Users/me/Downloads"));
+        assert_eq!(val["name"], json!("report"));
+    }
+
+    #[test]
     fn redact_value_does_not_touch_numbers_bools_null() {
         let mut val = json!({
             "count": 42,
@@ -753,16 +814,17 @@ mod tests {
                 "password": "supersecret"
             }
         });
-        // The inner object value "supersecret" is at key "password", but
-        // redact_value operates on the string leaf directly.  The key=value
-        // detector requires the key to appear IN the string value.
-        // Here the string leaf is just "supersecret" without the key prefix,
-        // so redact_text won't fire — which is CORRECT: the key is structural,
-        // stored separately by JSON. Only the value string is passed to
-        // redact_text.  This is acceptable / by design.
+        // Key-aware: "supersecret" lives under the sensitive key "password",
+        // so it is redacted even though the bare value matches no token pattern.
+        // The recursion reaches the nested object and applies the key rule there.
         let count = redact_value(&mut val);
-        // "localhost" is plain, "supersecret" has no secret prefix → 0
-        assert_eq!(count, 0);
+        assert_eq!(count, 1);
+        assert_eq!(
+            val["db"]["host"],
+            json!("localhost"),
+            "non-sensitive key untouched"
+        );
+        assert_eq!(val["db"]["password"].as_str(), Some(MARKER));
     }
 
     #[test]
