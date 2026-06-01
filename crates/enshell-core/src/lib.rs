@@ -160,6 +160,7 @@ impl<P: ModelProvider> Orchestrator<P> {
             decision,
             plan,
             preview,
+            user_request: user_request.to_owned(),
         }))
     }
 
@@ -189,7 +190,7 @@ impl<P: ModelProvider> Orchestrator<P> {
         confirmation: &Confirmation,
         control: &ExecControl,
     ) -> Result<ExecutionRecord, CoreError> {
-        let decision = &actionable.decision;
+        let decision = actionable.decision();
 
         // Gate 1: MVP executability (tier check).
         if !is_mvp_executable(decision) {
@@ -238,13 +239,13 @@ impl<P: ModelProvider> Orchestrator<P> {
 
         // Execute — all execution goes through execute_controlled (structured CommandPlan).
         let out =
-            execute_controlled(&actionable.plan, &effective_control).map_err(CoreError::Exec)?;
+            execute_controlled(actionable.plan(), &effective_control).map_err(CoreError::Exec)?;
 
-        let intent_name = intent_name(&actionable.intent).to_owned();
-        let command_display = display_command(&actionable.plan);
+        let intent_name = intent_name(actionable.intent()).to_owned();
+        let command_display = display_command(actionable.plan());
 
         Ok(ExecutionRecord {
-            user_request: String::new(), // caller can fill in if desired; omitted here
+            user_request: actionable.user_request().to_owned(),
             intent_name,
             risk_tier: decision.tier,
             command_display,
@@ -286,17 +287,54 @@ pub enum Prepared {
 ///
 /// This value is safe to display to the user (see [`Actionable::preview`])
 /// and can be passed to [`Orchestrator::execute`] after confirmation.
+///
+/// # Sealed construction
+///
+/// All fields are private. The only way to obtain an `Actionable` is through
+/// [`Orchestrator::prepare`], which runs the full validate → classify → render
+/// pipeline. External crates cannot forge an `Actionable` that bypasses that
+/// pipeline.
 #[derive(Debug, Clone)]
 pub struct Actionable {
     /// The validated, typed intent.
-    pub intent: Intent,
+    intent: Intent,
     /// The authoritative policy decision (tier, confirmation kind, etc.).
-    pub decision: RiskDecision,
+    decision: RiskDecision,
     /// The structured OS command plan — **not a shell string**.
-    pub plan: CommandPlan,
+    plan: CommandPlan,
     /// A plain-English description of what will happen, the risk label,
     /// and the literal command (for display only — never passed to a shell).
-    pub preview: String,
+    preview: String,
+    /// The original user request that produced this action.
+    user_request: String,
+}
+
+impl Actionable {
+    /// The validated, typed intent.
+    pub fn intent(&self) -> &Intent {
+        &self.intent
+    }
+
+    /// The authoritative policy decision (tier, confirmation kind, etc.).
+    pub fn decision(&self) -> &RiskDecision {
+        &self.decision
+    }
+
+    /// The structured OS command plan — **not a shell string**.
+    pub fn plan(&self) -> &CommandPlan {
+        &self.plan
+    }
+
+    /// A plain-English description of what will happen, the risk label,
+    /// and the literal command (for display only — never passed to a shell).
+    pub fn preview(&self) -> &str {
+        &self.preview
+    }
+
+    /// The original user request that produced this action.
+    pub fn user_request(&self) -> &str {
+        &self.user_request
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +370,7 @@ pub struct Confirmation {
 /// The result of a successful execution.
 #[derive(Debug, Clone)]
 pub struct ExecutionRecord {
-    /// The original user request (may be empty if not captured).
+    /// The original user request that produced this execution.
     pub user_request: String,
     /// The snake_case name of the executed intent.
     pub intent_name: String,
@@ -646,12 +684,12 @@ mod tests {
         match result {
             Ok(Prepared::Actionable(a)) => {
                 assert!(
-                    matches!(a.intent, Intent::FindProcessUsingPort { port: 3000 }),
+                    matches!(a.intent(), Intent::FindProcessUsingPort { port: 3000 }),
                     "expected FindProcessUsingPort{{port:3000}}, got {:?}",
-                    a.intent
+                    a.intent()
                 );
-                assert_eq!(a.decision.tier, RiskTier::ReadOnly);
-                assert!(!plan_requires_shell(&a.plan));
+                assert_eq!(a.decision().tier, RiskTier::ReadOnly);
+                assert!(!plan_requires_shell(a.plan()));
             }
             Ok(other) => panic!("expected Actionable, got: {:?}", variant_name(&other)),
             Err(e) => panic!("prepare failed: {e}"),
@@ -671,10 +709,10 @@ mod tests {
                     "ss"
                 };
                 assert!(
-                    a.preview.contains(expected_prog),
+                    a.preview().contains(expected_prog),
                     "preview should contain '{}', got: {}",
                     expected_prog,
-                    a.preview
+                    a.preview()
                 );
             }
             other => panic!("expected Actionable, got {:?}", variant_name(&other)),
@@ -686,7 +724,7 @@ mod tests {
         let orch = orchestrator_with_stub();
         match orch.prepare("what is using port 3000").expect("ok") {
             Prepared::Actionable(a) => {
-                assert!(!plan_requires_shell(&a.plan));
+                assert!(!plan_requires_shell(a.plan()));
             }
             other => panic!("expected Actionable, got {:?}", variant_name(&other)),
         }
@@ -797,6 +835,7 @@ mod tests {
             decision,
             plan,
             preview: "open /tmp".to_owned(),
+            user_request: "open /tmp".to_owned(),
         };
 
         // Use a dummy orchestrator — only execute() is called.
@@ -844,6 +883,7 @@ mod tests {
             decision,
             plan,
             preview: "open /tmp".to_owned(),
+            user_request: "open /tmp".to_owned(),
         };
 
         let orch = orchestrator_with_stub();
@@ -886,6 +926,7 @@ mod tests {
             decision,
             plan,
             preview: "check port 59876".to_owned(),
+            user_request: "what is using port 59876".to_owned(),
         };
 
         let orch = orchestrator_with_stub();
@@ -917,6 +958,7 @@ mod tests {
             decision,
             plan,
             preview: "check port 3000".to_owned(),
+            user_request: "what is using port 3000".to_owned(),
         };
 
         let orch = orchestrator_with_stub();
@@ -949,6 +991,7 @@ mod tests {
             decision,
             plan,
             preview: "brew install vim".to_owned(),
+            user_request: "install vim".to_owned(),
         };
 
         let orch = orchestrator_with_stub();
@@ -982,10 +1025,10 @@ mod tests {
         };
 
         assert!(
-            matches!(actionable.intent, Intent::FindLargeFiles { .. }),
+            matches!(actionable.intent(), Intent::FindLargeFiles { .. }),
             "expected FindLargeFiles"
         );
-        assert_eq!(actionable.decision.tier, RiskTier::ReadOnly);
+        assert_eq!(actionable.decision().tier, RiskTier::ReadOnly);
 
         let record = orch
             .execute(&actionable, &yes_confirmation(), &ExecControl::default())
@@ -994,6 +1037,10 @@ mod tests {
         assert_eq!(record.exit_code, Some(0), "du|sort|head should exit 0");
         assert!(!record.stdout.is_empty(), "stdout should be non-empty");
         assert_eq!(record.confirmation_mode, "yes");
+        assert_eq!(
+            record.user_request, "find the largest files here",
+            "ExecutionRecord.user_request must equal the original request"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1063,6 +1110,7 @@ mod tests {
             decision,
             plan,
             preview: "open /tmp".to_owned(),
+            user_request: "open /tmp".to_owned(),
         };
 
         let orch = orchestrator_with_stub();
@@ -1126,6 +1174,7 @@ mod tests {
             decision,
             plan,
             preview: "sleep 10".to_owned(),
+            user_request: "sleep 10 seconds".to_owned(),
         };
 
         let control = ExecControl {

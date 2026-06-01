@@ -28,12 +28,12 @@ fn natural_language_prepares_a_read_only_action() {
     match prepared {
         Prepared::Actionable(a) => {
             assert!(
-                a.preview.contains("3000"),
+                a.preview().contains("3000"),
                 "preview should mention the port; got: {}",
-                a.preview
+                a.preview()
             );
             // The rendered plan must be shell-free.
-            assert!(!enshell_os::plan_requires_shell(&a.plan));
+            assert!(!enshell_os::plan_requires_shell(a.plan()));
         }
         other => panic!("expected Actionable, got {other:?}"),
     }
@@ -93,7 +93,7 @@ fn full_natural_language_chain_executes_on_unix() {
         Prepared::Actionable(a) => a,
         other => panic!("expected Actionable, got {other:?}"),
     };
-    assert!(!enshell_os::plan_requires_shell(&actionable.plan));
+    assert!(!enshell_os::plan_requires_shell(actionable.plan()));
 
     // Read-only + --yes is auto-confirmable per the Confirmation Invariant.
     let confirmation = enshell_core::Confirmation {
