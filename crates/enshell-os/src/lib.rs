@@ -23,7 +23,10 @@
 use std::io;
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 /// Maximum number of bytes retained from an intermediate stage's stderr.
 ///
@@ -246,7 +249,31 @@ pub struct ExecOutput {
     pub exit_code: Option<i32>,
 }
 
-/// Errors produced by [`execute`].
+/// Controls for a single execution: an optional wall-clock timeout and a
+/// cooperative cancellation flag (e.g. wired to Ctrl-C by the CLI).
+///
+/// Passing `&ExecControl::default()` to [`execute_controlled`] is identical in
+/// behaviour to calling [`execute`] — the no-control fast path is taken.
+#[derive(Clone)]
+pub struct ExecControl {
+    /// Maximum wall-clock time to allow the execution to run. `None` means no limit.
+    pub timeout: Option<Duration>,
+    /// Cooperative cancellation flag. Set to `true` from another thread (e.g. a
+    /// Ctrl-C handler) to request cancellation. The executor checks this on each
+    /// poll tick and returns [`ExecError::Cancelled`] when it is set.
+    pub cancel: Arc<AtomicBool>,
+}
+
+impl Default for ExecControl {
+    fn default() -> Self {
+        Self {
+            timeout: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+/// Errors produced by [`execute`] and [`execute_controlled`].
 #[derive(Debug)]
 pub enum ExecError {
     /// The program was not found on `PATH` (maps `io::ErrorKind::NotFound`).
@@ -260,6 +287,12 @@ pub enum ExecError {
     /// The plan's top-level variant is [`CommandPlan::RequiresShell`], which is
     /// denied by default. No process was spawned.
     ShellNotPermitted,
+    /// The execution wall-clock deadline was exceeded. All spawned processes were
+    /// killed and reaped before this error was returned.
+    TimedOut,
+    /// The execution was cancelled via [`ExecControl::cancel`]. All spawned
+    /// processes were killed and reaped before this error was returned.
+    Cancelled,
 }
 
 impl std::fmt::Display for ExecError {
@@ -274,6 +307,8 @@ impl std::fmt::Display for ExecError {
             ExecError::ShellNotPermitted => {
                 write!(f, "RequiresShell plans are denied by default")
             }
+            ExecError::TimedOut => write!(f, "execution timed out"),
+            ExecError::Cancelled => write!(f, "execution was cancelled"),
         }
     }
 }
@@ -330,14 +365,76 @@ fn map_spawn_error(program: &str, err: io::Error) -> ExecError {
 /// (they are not accumulated). If any step exits non-zero, execution stops
 /// immediately and that step's stderr is included in [`ExecError::NonZeroExit`].
 pub fn execute(plan: &CommandPlan) -> Result<ExecOutput, ExecError> {
+    execute_controlled(plan, &ExecControl::default())
+}
+
+/// Execute a [`CommandPlan`] with optional timeout and cooperative cancellation.
+///
+/// # Fast path (no control active)
+///
+/// When `control.timeout` is `None` **and** `control.cancel` is not already set,
+/// this function delegates directly to the same blocking implementation paths used
+/// by [`execute`]. The behaviour is byte-identical to `execute(plan)`.
+///
+/// # Poll path (timeout or cancel active)
+///
+/// When a timeout is set or the cancel flag could plausibly be used, a poll-based
+/// path is taken:
+///
+/// - Processes are spawned the same way (no shell; `RequiresShell` still denied).
+/// - stdout and stderr are drained by background threads so polling never deadlocks
+///   on a full pipe.
+/// - The executor polls with [`std::process::Child::try_wait`] on a 20 ms interval.
+///   On each tick it checks: (a) whether the cancel flag is set → kills all
+///   children, joins drain threads, returns [`ExecError::Cancelled`]; (b) whether
+///   the deadline has been exceeded → same cleanup, returns [`ExecError::TimedOut`].
+/// - On normal completion, output is collected and the same exit-status rules as
+///   the blocking path are applied (non-zero exit → [`ExecError::NonZeroExit`];
+///   SIGPIPE on upstream pipeline stages tolerated).
+/// - Cleanup always uses `kill_and_reap` / `abort_pipeline` — no process is
+///   ever left running after this function returns.
+///
+/// # Sequence time tracking
+///
+/// For [`CommandPlan::Sequence`] with a timeout, the remaining deadline is passed
+/// to each step's poll loop. Cancellation is also checked between steps.
+pub fn execute_controlled(
+    plan: &CommandPlan,
+    control: &ExecControl,
+) -> Result<ExecOutput, ExecError> {
+    // Fast path: no timeout AND the cancel arc is exclusively owned by this
+    // ExecControl (strong_count == 1 means no external thread can set it) AND
+    // not already set → delegate to the unchanged blocking paths.
+    //
+    // The strong_count check is the key: `execute(&plan)` creates a fresh
+    // `ExecControl::default()` whose Arc has count 1.  A caller that clones the
+    // Arc to wire up a Ctrl-C handler will have count >= 2, so we correctly take
+    // the poll path.
+    let cancel_is_unshared = Arc::strong_count(&control.cancel) == 1;
+    if control.timeout.is_none() && cancel_is_unshared && !control.cancel.load(Ordering::Relaxed) {
+        return match plan {
+            CommandPlan::Exec(step) => execute_step(step),
+            CommandPlan::Pipeline(steps) => execute_pipeline(steps),
+            CommandPlan::Sequence(steps) => execute_sequence(steps),
+            CommandPlan::RequiresShell { .. } => Err(ExecError::ShellNotPermitted),
+        };
+    }
+
+    // Poll path: a timeout is set or the cancel flag is already set.
     match plan {
-        CommandPlan::Exec(step) => execute_step(step),
-
-        CommandPlan::Pipeline(steps) => execute_pipeline(steps),
-
-        CommandPlan::Sequence(steps) => execute_sequence(steps),
-
         CommandPlan::RequiresShell { .. } => Err(ExecError::ShellNotPermitted),
+        CommandPlan::Exec(step) => {
+            let deadline = control.timeout.map(|d| Instant::now() + d);
+            execute_step_controlled(step, deadline, &control.cancel)
+        }
+        CommandPlan::Pipeline(steps) => {
+            let deadline = control.timeout.map(|d| Instant::now() + d);
+            execute_pipeline_controlled(steps, deadline, &control.cancel)
+        }
+        CommandPlan::Sequence(steps) => {
+            let deadline = control.timeout.map(|d| Instant::now() + d);
+            execute_sequence_controlled(steps, deadline, &control.cancel)
+        }
     }
 }
 
@@ -698,6 +795,399 @@ fn execute_sequence(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
 
     for step in steps {
         last_output = execute_step(step)?; // propagates NonZeroExit, stopping the sequence
+    }
+
+    Ok(last_output)
+}
+
+// ── Poll-based controlled execution ──────────────────────────────────────────
+
+/// Poll interval for the controlled execution paths.
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Check cancel and deadline on each poll tick. Returns `Some(err)` if either
+/// condition is triggered, or `None` to continue.
+fn check_control(cancel: &AtomicBool, deadline: Option<Instant>) -> Option<ExecError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Some(ExecError::Cancelled);
+    }
+    if let Some(dl) = deadline {
+        if Instant::now() >= dl {
+            return Some(ExecError::TimedOut);
+        }
+    }
+    None
+}
+
+/// Read `reader` to EOF, collecting all bytes (unbounded). Used for the single-step
+/// stdout drain where we want the full output, not just the first `cap` bytes.
+fn drain_full<R: Read>(mut reader: R) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
+        match reader.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(_) => break,
+        }
+    }
+    buf
+}
+
+/// Poll-based single-step executor. Spawns the process, drains stdout+stderr via
+/// threads, and polls with `try_wait()` until completion, timeout, or cancellation.
+fn execute_step_controlled(
+    step: &ExecStep,
+    deadline: Option<Instant>,
+    cancel: &AtomicBool,
+) -> Result<ExecOutput, ExecError> {
+    // Bail immediately if already cancelled or past deadline.
+    if let Some(err) = check_control(cancel, deadline) {
+        return Err(err);
+    }
+
+    let mut child = Command::new(&step.program)
+        .args(&step.args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| map_spawn_error(&step.program, e))?;
+
+    // Drain stdout and stderr via threads so polling never deadlocks on a full pipe.
+    let stdout_pipe = child.stdout.take();
+    let stdout_thread: thread::JoinHandle<Vec<u8>> = thread::spawn(move || match stdout_pipe {
+        Some(p) => drain_full(p),
+        None => Vec::new(),
+    });
+
+    let stderr_pipe = child.stderr.take();
+    let stderr_thread: thread::JoinHandle<Vec<u8>> = thread::spawn(move || match stderr_pipe {
+        Some(p) => drain_bounded(p, MAX_STAGE_STDERR),
+        None => Vec::new(),
+    });
+
+    // Poll loop.
+    loop {
+        if let Some(err) = check_control(cancel, deadline) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return Err(err);
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout_bytes = stdout_thread.join().unwrap_or_default();
+                let stderr_bytes = stderr_thread.join().unwrap_or_default();
+                let exit_code = status.code();
+                let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
+                let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+
+                return if status.success() {
+                    Ok(ExecOutput {
+                        stdout,
+                        stderr,
+                        exit_code,
+                    })
+                } else {
+                    Err(ExecError::NonZeroExit {
+                        code: exit_code,
+                        stderr,
+                    })
+                };
+            }
+            Ok(None) => {
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(ExecError::Io(e));
+            }
+        }
+    }
+}
+
+/// Poll-based pipeline executor. Mirrors `execute_pipeline` but polls `try_wait`
+/// on the last stage and checks cancel/deadline on each tick.
+///
+/// All intermediate children and their drain threads are tracked throughout;
+/// on timeout or cancellation `abort_pipeline` kills+reaps everyone before
+/// returning, preventing orphaned processes.
+fn execute_pipeline_controlled(
+    steps: &[ExecStep],
+    deadline: Option<Instant>,
+    cancel: &AtomicBool,
+) -> Result<ExecOutput, ExecError> {
+    if steps.is_empty() {
+        return Err(ExecError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Pipeline must have at least one step",
+        )));
+    }
+
+    if steps.len() == 1 {
+        return execute_step_controlled(&steps[0], deadline, cancel);
+    }
+
+    if let Some(err) = check_control(cancel, deadline) {
+        return Err(err);
+    }
+
+    // ── Phase 1: spawn all stages (same wiring as execute_pipeline) ────────────
+
+    let first = &steps[0];
+    let mut prev_child = Command::new(&first.program)
+        .args(&first.args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| map_spawn_error(&first.program, e))?;
+
+    let first_stderr_thread: thread::JoinHandle<Vec<u8>> = {
+        let pipe = prev_child.stderr.take();
+        thread::spawn(move || match pipe {
+            Some(p) => drain_bounded(p, MAX_STAGE_STDERR),
+            None => Vec::new(),
+        })
+    };
+
+    let mut intermediate_children: Vec<std::process::Child> = Vec::new();
+    let mut stderr_threads: Vec<thread::JoinHandle<Vec<u8>>> = Vec::new();
+    let mut prev_stderr_thread: thread::JoinHandle<Vec<u8>> = first_stderr_thread;
+
+    for step in &steps[1..steps.len() - 1] {
+        let stdin_pipe = match prev_child.stdout.take() {
+            Some(pipe) => Stdio::from(pipe),
+            None => {
+                intermediate_children.push(prev_child);
+                stderr_threads.push(prev_stderr_thread);
+                abort_pipeline(intermediate_children, stderr_threads);
+                return Err(ExecError::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "could not take stdout from child",
+                )));
+            }
+        };
+
+        match Command::new(&step.program)
+            .args(&step.args)
+            .stdin(stdin_pipe)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(mut c) => {
+                let pipe = c.stderr.take();
+                let drain_handle = thread::spawn(move || match pipe {
+                    Some(p) => drain_bounded(p, MAX_STAGE_STDERR),
+                    None => Vec::new(),
+                });
+                intermediate_children.push(prev_child);
+                stderr_threads.push(prev_stderr_thread);
+                prev_child = c;
+                prev_stderr_thread = drain_handle;
+            }
+            Err(e) => {
+                intermediate_children.push(prev_child);
+                stderr_threads.push(prev_stderr_thread);
+                abort_pipeline(intermediate_children, stderr_threads);
+                return Err(map_spawn_error(&step.program, e));
+            }
+        }
+    }
+
+    let last = match steps.last() {
+        Some(step) => step,
+        None => {
+            intermediate_children.push(prev_child);
+            stderr_threads.push(prev_stderr_thread);
+            abort_pipeline(intermediate_children, stderr_threads);
+            return Err(ExecError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "pipeline has no steps",
+            )));
+        }
+    };
+
+    let stdin_pipe = match prev_child.stdout.take() {
+        Some(pipe) => Stdio::from(pipe),
+        None => {
+            intermediate_children.push(prev_child);
+            stderr_threads.push(prev_stderr_thread);
+            abort_pipeline(intermediate_children, stderr_threads);
+            return Err(ExecError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "could not take stdout from child",
+            )));
+        }
+    };
+    intermediate_children.push(prev_child);
+    stderr_threads.push(prev_stderr_thread);
+
+    // Spawn the last stage with stdout and stderr drained by threads.
+    let mut last_child = match Command::new(&last.program)
+        .args(&last.args)
+        .stdin(stdin_pipe)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            abort_pipeline(intermediate_children, stderr_threads);
+            return Err(map_spawn_error(&last.program, e));
+        }
+    };
+
+    // Drain last stage's stdout (full capture) and stderr via threads.
+    let last_stdout_pipe = last_child.stdout.take();
+    let last_stdout_thread: thread::JoinHandle<Vec<u8>> =
+        thread::spawn(move || match last_stdout_pipe {
+            Some(p) => drain_full(p),
+            None => Vec::new(),
+        });
+    let last_stderr_pipe = last_child.stderr.take();
+    let last_stderr_thread: thread::JoinHandle<Vec<u8>> =
+        thread::spawn(move || match last_stderr_pipe {
+            Some(p) => drain_bounded(p, MAX_STAGE_STDERR),
+            None => Vec::new(),
+        });
+
+    // ── Phase 2: poll the last stage, checking cancel/deadline on each tick ────
+
+    let last_status = loop {
+        if let Some(err) = check_control(cancel, deadline) {
+            // Kill last child + all intermediates, join all threads, then return.
+            let _ = last_child.kill();
+            let _ = last_child.wait();
+            abort_pipeline(intermediate_children, stderr_threads);
+            let _ = last_stdout_thread.join();
+            let _ = last_stderr_thread.join();
+            return Err(err);
+        }
+
+        match last_child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(e) => {
+                let _ = last_child.kill();
+                let _ = last_child.wait();
+                abort_pipeline(intermediate_children, stderr_threads);
+                let _ = last_stdout_thread.join();
+                let _ = last_stderr_thread.join();
+                return Err(ExecError::Io(e));
+            }
+        }
+    };
+
+    // ── Phase 3: reap intermediate children, collect stderr captures ───────────
+
+    let last_exit_code = last_status.code();
+    let last_stdout_bytes = last_stdout_thread.join().unwrap_or_default();
+    let last_stderr_bytes = last_stderr_thread.join().unwrap_or_default();
+    let last_stdout = String::from_utf8_lossy(&last_stdout_bytes).into_owned();
+    let last_stderr = String::from_utf8_lossy(&last_stderr_bytes).into_owned();
+
+    let mut first_failure: Option<ExecError> = None;
+    let mut first_failing_idx: Option<usize> = None;
+
+    for (idx, child) in intermediate_children.iter_mut().enumerate() {
+        match child.wait() {
+            Ok(status) if status.success() => {}
+            Ok(status) if terminated_by_sigpipe(&status) => {}
+            Ok(status) => {
+                if first_failure.is_none() {
+                    first_failing_idx = Some(idx);
+                    first_failure = Some(ExecError::NonZeroExit {
+                        code: status.code(),
+                        stderr: String::new(),
+                    });
+                }
+            }
+            Err(_) => {
+                if first_failure.is_none() {
+                    first_failure = Some(ExecError::Io(io::Error::other(format!(
+                        "failed to wait on pipeline stage {idx}"
+                    ))));
+                }
+            }
+        }
+    }
+
+    let stderr_captures: Vec<Vec<u8>> = stderr_threads
+        .into_iter()
+        .map(|h| h.join().unwrap_or_default())
+        .collect();
+
+    if let Some(err) = first_failure {
+        let err = match (err, first_failing_idx) {
+            (ExecError::NonZeroExit { code, .. }, Some(idx)) => {
+                let captured = stderr_captures
+                    .get(idx)
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_default();
+                let stderr = if !captured.is_empty() {
+                    captured
+                } else if !last_stderr.is_empty() {
+                    last_stderr
+                } else {
+                    format!("pipeline stage {idx} exited with non-zero status")
+                };
+                ExecError::NonZeroExit { code, stderr }
+            }
+            (other, _) => other,
+        };
+        return Err(err);
+    }
+
+    if last_status.success() {
+        Ok(ExecOutput {
+            stdout: last_stdout,
+            stderr: last_stderr,
+            exit_code: last_exit_code,
+        })
+    } else {
+        Err(ExecError::NonZeroExit {
+            code: last_exit_code,
+            stderr: last_stderr,
+        })
+    }
+}
+
+/// Poll-based sequence executor. Runs each step via `execute_step_controlled`,
+/// tracking remaining time across steps and checking cancellation between steps.
+fn execute_sequence_controlled(
+    steps: &[ExecStep],
+    deadline: Option<Instant>,
+    cancel: &AtomicBool,
+) -> Result<ExecOutput, ExecError> {
+    if steps.is_empty() {
+        return Err(ExecError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Sequence must have at least one step",
+        )));
+    }
+
+    let mut last_output = ExecOutput {
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: None,
+    };
+
+    for step in steps {
+        // Check cancel/deadline before each step (also checked inside the step).
+        if let Some(err) = check_control(cancel, deadline) {
+            return Err(err);
+        }
+        // The deadline is passed through unchanged; each step polls against the
+        // same wall-clock deadline, so remaining time naturally shrinks.
+        last_output = execute_step_controlled(step, deadline, cancel)?;
     }
 
     Ok(last_output)
@@ -1280,5 +1770,155 @@ mod tests {
         let cursor = std::io::Cursor::new(vec![]);
         let result = drain_bounded(cursor, 1024);
         assert!(result.is_empty());
+    }
+
+    // ── execute_controlled tests (Unix) ──────────────────────────────────────
+
+    #[cfg(unix)]
+    mod controlled {
+        use super::*;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        /// Timeout: `sleep 10` with a 200ms timeout → `Err(TimedOut)` returned
+        /// well within 2 seconds (not 10 seconds). Verifies the process was killed.
+        #[test]
+        fn test_controlled_timeout_sleep() {
+            let plan = CommandPlan::exec("sleep", ["10"]);
+            let control = ExecControl {
+                timeout: Some(Duration::from_millis(200)),
+                ..ExecControl::default()
+            };
+
+            let (tx, rx) = mpsc::channel();
+            let start = Instant::now();
+            std::thread::spawn(move || {
+                let _ = tx.send(execute_controlled(&plan, &control));
+            });
+
+            let result = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("execute_controlled hung — timeout did not fire within 5s");
+
+            let elapsed = start.elapsed();
+            assert!(
+                matches!(result, Err(ExecError::TimedOut)),
+                "expected TimedOut, got {result:?}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "timeout took too long: {elapsed:?}"
+            );
+        }
+
+        /// Cancel: a thread sets `cancel` after ~100ms; `sleep 10` → `Err(Cancelled)` promptly.
+        #[test]
+        fn test_controlled_cancel_sleep() {
+            let plan = CommandPlan::exec("sleep", ["10"]);
+            let control = ExecControl::default();
+            let cancel_flag = Arc::clone(&control.cancel);
+
+            // Trigger cancellation after 100ms.
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                cancel_flag.store(true, Ordering::Relaxed);
+            });
+
+            let (tx, rx) = mpsc::channel();
+            let start = Instant::now();
+            std::thread::spawn(move || {
+                let _ = tx.send(execute_controlled(&plan, &control));
+            });
+
+            let result = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("execute_controlled hung — cancel did not fire within 5s");
+
+            let elapsed = start.elapsed();
+            assert!(
+                matches!(result, Err(ExecError::Cancelled)),
+                "expected Cancelled, got {result:?}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "cancel took too long: {elapsed:?}"
+            );
+        }
+
+        /// No-timeout: `execute_controlled` with `ExecControl::default()` on a fast
+        /// command → `Ok`, output matches `execute`.
+        #[test]
+        fn test_controlled_no_timeout_echo() {
+            let plan = CommandPlan::exec("echo", ["hi"]);
+            let controlled_result =
+                execute_controlled(&plan, &ExecControl::default()).expect("should succeed");
+            let plain_result = execute(&plan).expect("should succeed");
+            assert_eq!(controlled_result.stdout, plain_result.stdout);
+            assert_eq!(controlled_result.stdout, "hi\n");
+        }
+
+        /// Timeout that is NOT exceeded: `echo hi` with a 5s timeout → `Ok "hi\n"`.
+        #[test]
+        fn test_controlled_timeout_not_exceeded() {
+            let plan = CommandPlan::exec("echo", ["hi"]);
+            let control = ExecControl {
+                timeout: Some(Duration::from_secs(5)),
+                ..ExecControl::default()
+            };
+            let output = execute_controlled(&plan, &control).expect("echo should succeed");
+            assert_eq!(output.stdout, "hi\n");
+        }
+
+        /// Pipeline timeout: `sleep 10 | cat` with a 200ms timeout → `TimedOut`,
+        /// both children killed (returns well under 10s).
+        #[test]
+        fn test_controlled_pipeline_timeout() {
+            let plan = CommandPlan::pipeline(vec![
+                ExecStep::new("sleep", ["10"]),
+                ExecStep::new("cat", [] as [&str; 0]),
+            ]);
+            let control = ExecControl {
+                timeout: Some(Duration::from_millis(200)),
+                ..ExecControl::default()
+            };
+
+            let (tx, rx) = mpsc::channel();
+            let start = Instant::now();
+            std::thread::spawn(move || {
+                let _ = tx.send(execute_controlled(&plan, &control));
+            });
+
+            let result = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("execute_controlled pipeline hung — timeout did not fire within 5s");
+
+            let elapsed = start.elapsed();
+            assert!(
+                matches!(result, Err(ExecError::TimedOut)),
+                "expected TimedOut from pipeline, got {result:?}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "pipeline timeout took too long: {elapsed:?}"
+            );
+        }
+
+        /// RequiresShell is still denied even through execute_controlled with a
+        /// timeout set.
+        #[test]
+        fn test_controlled_requires_shell_still_denied() {
+            let plan = CommandPlan::RequiresShell {
+                shell: ShellKind::Bash,
+                script: "echo hi".to_owned(),
+            };
+            let control = ExecControl {
+                timeout: Some(Duration::from_secs(1)),
+                ..ExecControl::default()
+            };
+            assert!(matches!(
+                execute_controlled(&plan, &control),
+                Err(ExecError::ShellNotPermitted)
+            ));
+        }
     }
 }
