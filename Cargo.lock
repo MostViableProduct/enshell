@@ -17,6 +17,14 @@ version = "0.0.0"
 [[package]]
 name = "enshell-core"
 version = "0.0.0"
+dependencies = [
+ "enshell-adapters",
+ "enshell-intents",
+ "enshell-model",
+ "enshell-os",
+ "enshell-policy",
+ "serde_json",
+]
 
 [[package]]
 name = "enshell-intents"
@@ -67,7 +75,9 @@ name = "enshell-tests"
 version = "0.0.0"
 dependencies = [
  "enshell-adapters",
+ "enshell-core",
  "enshell-intents",
+ "enshell-model",
  "enshell-os",
  "enshell-policy",
 ]
