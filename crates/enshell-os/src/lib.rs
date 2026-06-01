@@ -287,6 +287,23 @@ impl std::error::Error for ExecError {
     }
 }
 
+/// Returns `true` if `status` indicates the process was terminated by SIGPIPE
+/// (signal 13).
+///
+/// Used in [`execute_pipeline`] to tolerate upstream stages that are killed by
+/// SIGPIPE when a downstream stage (e.g. `head`) closes its stdin early — a
+/// normal Unix truncating-pipeline behavior.
+#[cfg(unix)]
+fn terminated_by_sigpipe(status: &std::process::ExitStatus) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal() == Some(13) // SIGPIPE
+}
+
+#[cfg(not(unix))]
+fn terminated_by_sigpipe(_status: &std::process::ExitStatus) -> bool {
+    false
+}
+
 /// Map an `io::Error` from spawning `program` to the appropriate [`ExecError`].
 fn map_spawn_error(program: &str, err: io::Error) -> ExecError {
     if err.kind() == io::ErrorKind::NotFound {
@@ -400,11 +417,19 @@ fn abort_pipeline(
 ///   waited before the error is returned, preventing leaks.  All in-flight
 ///   stderr drain threads are joined before returning.
 ///
-/// - If **any** stage exits non-zero, the function returns
-///   [`ExecError::NonZeroExit`]. The FIRST failing intermediate stage's own
-///   captured stderr is included; if that join fails, a fallback message naming
-///   the stage index is used. The last stage's captured stderr is used when no
-///   intermediate stage failed.
+/// - If **any** stage exits non-zero (and is not tolerated — see below), the
+///   function returns [`ExecError::NonZeroExit`]. The FIRST failing intermediate
+///   stage's own captured stderr is included; if that join fails, a fallback
+///   message naming the stage index is used. The last stage's captured stderr is
+///   used when no intermediate stage failed.
+///
+/// - **SIGPIPE tolerance for upstream stages**: An upstream (non-last) stage
+///   terminated by SIGPIPE — e.g. because a downstream stage like `head` closed
+///   the pipe after reading enough — is treated as success. Only a genuine
+///   non-zero exit code or a non-SIGPIPE termination signal in an upstream stage
+///   fails the pipeline. The last stage is always checked strictly (its stdout is
+///   fully drained by us, so it will not be SIGPIPE-killed; a real failure there
+///   must still surface).
 fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
     if steps.is_empty() {
         return Err(ExecError::Io(io::Error::new(
@@ -557,17 +582,18 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
     // on each intermediate child in order to reap them and check exit codes.
     // The stderr drain threads run concurrently with all of this.
 
-    let last_output = last_child.wait_with_output().map_err(|e| {
-        for handle in &mut stderr_threads {
-            // Threads are not cloneable but we want to join-all; we'll do that
-            // after returning, but at minimum drain them by not leaking the vec.
-            // We can't move out of a &mut, so we accept the drain threads may
-            // linger until drop here.  A leak-free path is handled below.
-            let _ = handle;
+    let last_output = match last_child.wait_with_output() {
+        Ok(output) => output,
+        Err(e) => {
+            // `last_child` was consumed by `wait_with_output`, so only
+            // `intermediate_children` and `stderr_threads` need cleanup.
+            // Route through `abort_pipeline` for consistent kill/reap order:
+            // kills children first (closing their stderr pipes so drain threads
+            // reach EOF), then joins the drain threads.
+            abort_pipeline(intermediate_children, stderr_threads);
+            return Err(ExecError::Io(e));
         }
-        kill_and_reap(&mut intermediate_children);
-        ExecError::Io(e)
-    })?;
+    };
 
     let last_exit_code = last_output.status.code();
     let last_stdout = String::from_utf8_lossy(&last_output.stdout).into_owned();
@@ -583,6 +609,11 @@ fn execute_pipeline(steps: &[ExecStep]) -> Result<ExecOutput, ExecError> {
     for (idx, child) in intermediate_children.iter_mut().enumerate() {
         match child.wait() {
             Ok(status) if status.success() => {}
+            // An intermediate stage killed by SIGPIPE is tolerated — this is the
+            // normal outcome when a downstream stage (e.g. `head`) closes its
+            // stdin after reading enough data, causing the upstream writer to
+            // receive SIGPIPE on its next write.  It is not a genuine failure.
+            Ok(status) if terminated_by_sigpipe(&status) => {}
             Ok(status) => {
                 if first_failure.is_none() {
                     first_failing_idx = Some(idx);
@@ -1115,6 +1146,88 @@ mod tests {
                 matches!(result, Err(ExecError::ProgramNotFound(_))),
                 "expected ProgramNotFound, got {result:?}"
             );
+        }
+
+        // ── SIGPIPE tolerance tests ───────────────────────────────────────────
+
+        /// `yes | head -n 1` — `yes` produces infinite output; `head` reads one
+        /// line then closes its stdin, sending SIGPIPE to `yes`.  The upstream
+        /// `yes` stage is SIGPIPE-killed but that must be tolerated (it is the
+        /// normal truncating-pipeline behavior).  The pipeline must succeed and
+        /// return "y\n".
+        ///
+        /// This test also verifies promptness: because `yes` is an infinite
+        /// producer, failure to tolerate SIGPIPE would cause `head` to succeed
+        /// while the executor waits on `yes` forever.  The 5-second timeout
+        /// guards against that regression.
+        #[test]
+        fn test_pipeline_yes_head_tolerates_sigpipe() {
+            use std::sync::mpsc;
+            use std::time::Duration;
+
+            let plan = CommandPlan::pipeline(vec![
+                ExecStep::new("yes", [] as [&str; 0]),
+                ExecStep::new("head", ["-n", "1"]),
+            ]);
+
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(execute(&plan));
+            });
+
+            let result = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("execute() hung on yes|head — SIGPIPE not tolerated on upstream stage");
+
+            let output = result.expect("yes | head -n 1 should succeed");
+            assert_eq!(
+                output.stdout, "y\n",
+                "unexpected stdout: {:?}",
+                output.stdout
+            );
+        }
+
+        /// `false | true` — `false` exits with code 1 (NOT SIGPIPE).  The upstream
+        /// failure must still be detected and return `NonZeroExit`.
+        ///
+        /// Regression guard: SIGPIPE tolerance must not swallow genuine failures.
+        #[test]
+        fn test_pipeline_false_true_still_fails() {
+            let plan = CommandPlan::pipeline(vec![
+                ExecStep::new("false", [] as [&str; 0]),
+                ExecStep::new("true", [] as [&str; 0]),
+            ]);
+            let result = execute(&plan);
+            assert!(
+                matches!(result, Err(ExecError::NonZeroExit { .. })),
+                "expected NonZeroExit from upstream `false` (exit code 1, not SIGPIPE), got {result:?}"
+            );
+        }
+
+        /// `ls /nonexistent_enshell_xyz | cat` — `ls` exits non-zero with a real
+        /// error message on stderr.  Must still return `NonZeroExit` with non-empty
+        /// captured stderr.
+        ///
+        /// Regression guard: SIGPIPE tolerance must not swallow genuine failures,
+        /// and captured stderr must reach the caller.
+        #[test]
+        fn test_pipeline_ls_nonexistent_cat_still_fails_with_stderr() {
+            let plan = CommandPlan::pipeline(vec![
+                ExecStep::new("ls", ["/nonexistent_enshell_xyz"]),
+                ExecStep::new("cat", [] as [&str; 0]),
+            ]);
+            let result = execute(&plan);
+            match result {
+                Err(ExecError::NonZeroExit { stderr, .. }) => {
+                    assert!(
+                        !stderr.is_empty(),
+                        "expected non-empty stderr from failing `ls /nonexistent_enshell_xyz`, got empty string"
+                    );
+                }
+                other => panic!(
+                    "expected NonZeroExit from `ls /nonexistent_enshell_xyz | cat`, got {other:?}"
+                ),
+            }
         }
     }
 
