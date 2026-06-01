@@ -11,32 +11,28 @@ and their licenses.
 
 ## Current Status
 
-Phase 1 implementation has begun, so the workspace now has its first third-party
-dependencies, introduced by `enshell-intents` for JSON (de)serialization of model
-output:
+The workspace has third-party dependencies in two groups:
 
-| Direct dependency | Used by | License |
-|---|---|---|
-| `serde` (with `derive`) | `enshell-intents` | MIT OR Apache-2.0 |
-| `serde_json` | `enshell-intents` | MIT OR Apache-2.0 |
+- **Serialization** (`enshell-intents`, `enshell-model`): `serde` (+`serde_derive`,
+  `serde_core`), `serde_json`, and their transitive crates (`itoa`, `memchr`,
+  `zmij` — David Tolnay's `ryu`-successor float formatter, `proc-macro2`, `quote`,
+  `syn`, `unicode-ident`).
+- **CLI** (`enshell-cli`): `clap` (argument parsing, with `derive`) and `ctrlc`
+  (Ctrl-C → cancellation), plus their transitive crates (anstyle/anstream,
+  clap_builder/clap_lex/clap_derive, etc.).
 
-Transitive dependencies pulled in by the above (all permissive and
-Apache-2.0-compatible):
+Together these are roughly **30+ third-party crates**. Every one resolves to a
+permissive, Apache-2.0-compatible license drawn from the allowlist in
+[`deny.toml`](deny.toml): **Apache-2.0, MIT, Unicode-3.0, Unlicense** (a few crates
+additionally offer `Zlib` as an *alternative* in an `OR` expression; it is not the
+selected/required license, so it is not in the allowlist).
 
-- `serde_core`, `serde_derive`, `itoa`, `proc-macro2`, `quote`, `syn` — MIT OR Apache-2.0
-- `memchr` — Unlicense OR MIT
-- `zmij` (David Tolnay's Schubfach-based double-to-string formatter — the
-  successor to `ryu`, used by `serde_json`) — **MIT**
-- `unicode-ident` — (MIT OR Apache-2.0) AND **Unicode-3.0**
-
-The complete set of licenses present in the tree is therefore: **Apache-2.0,
-MIT, Unicode-3.0, Unlicense**.
-
-These identifiers are **verified by `cargo deny check`** against the allowlist in
-[`deny.toml`](deny.toml) (which permits exactly those four licenses), and the
-check runs in CI on every push and pull request (`.github/workflows/ci.yml`). A
-machine-generated SBOM / notice file (`cargo about`, `cargo cyclonedx`) will be
-added to the release pipeline as described below.
+This is **enforced by `cargo deny check`** on every push and pull request
+(`.github/workflows/ci.yml`): a dependency whose license is not satisfiable from the
+allowlist fails CI. Because the tree is now too large to enumerate by hand without
+drift, the authoritative per-crate inventory is the lockfile + `cargo deny`; a
+machine-generated SBOM / notice file (`cargo about`, `cargo cyclonedx`) is the
+planned mechanism for a frozen per-crate listing (see below).
 
 ---
 

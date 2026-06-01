@@ -10,20 +10,20 @@ This file is the dependency license inventory for the enShell workspace.
 
 ## Current Status
 
-The workspace now has its first third-party dependencies (Phase 1 has begun):
-`serde` and `serde_json` (direct, via `enshell-intents`), plus their transitive
-crates: `serde_core`, `serde_derive`, `itoa`, `memchr`, `zmij`, `proc-macro2`,
-`quote`, `syn`, `unicode-ident`. The licenses present in the tree are
-**Apache-2.0, MIT, Unicode-3.0, Unlicense** — all permissive and compatible with
-enShell's Apache-2.0 license. See
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for per-crate detail.
+The workspace has two groups of third-party dependencies — serialization
+(`serde`/`serde_json` via `enshell-intents`/`enshell-model`) and CLI (`clap` +
+`ctrlc` via `enshell-cli`) — for roughly **30+ crates** including transitives. All
+resolve to permissive licenses in the allowlist: **Apache-2.0, MIT, Unicode-3.0,
+Unlicense** (some crates also offer `Zlib` as an unselected `OR` alternative). See
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the grouping.
 
-**License enforcement is now live:** [`deny.toml`](deny.toml) defines a tight
-allowlist (exactly those four licenses), and `cargo deny check` runs in CI on
-every push and pull request (`.github/workflows/ci.yml`). A dependency with any
-other license fails CI until it is reviewed and explicitly allowed. The
-hand-maintained list above will be supplemented by a machine-generated SBOM /
-notice file (`cargo about`, `cargo cyclonedx`) in the release pipeline.
+**License enforcement is live:** [`deny.toml`](deny.toml) defines the allowlist and
+`cargo deny check` runs in CI on every push and pull request
+(`.github/workflows/ci.yml`); a dependency whose license isn't satisfiable from the
+allowlist fails CI until reviewed and explicitly allowed. The lockfile + `cargo
+deny` are the authoritative inventory at this stage; a machine-generated SBOM /
+notice file (`cargo about`, `cargo cyclonedx`) is the planned frozen per-crate
+listing.
 
 ---
 

@@ -16,11 +16,21 @@ enshell "why did the last command fail?"
 
 ## Status
 
-**Planning (Phase 0).** The repository contains the planning documentation,
-governance files, and a **compiling Rust workspace skeleton** — the `enshell-*`
-crates are stubs that build (`cargo build`) but have **no functional behavior
-yet**. The CLI, crates, and behaviors described here are a design, not a shipped
-product.
+**Early development.** A working **read-only MVP** runs end to end behind a
+**deterministic stub model** (the real Gemma 4 / llama.cpp provider is not wired
+yet). The `enshell` binary builds and runs:
+
+```bash
+enshell --dry-run "what is using port 3000"   # preview the plan + command, run nothing
+enshell --yes "find the largest files here"   # read-only, auto-confirmed, executes
+enshell doctor                                 # environment self-check
+```
+
+It recognizes a curated set of read-only requests (process-on-port, large files,
+system health, logs, open), previews them in plain English, asks for confirmation,
+and executes via a no-shell command executor. Natural-language understanding is
+currently a deterministic stub, and write/system actions are designed but not yet
+executable (read-only only). Not a finished product.
 
 ## How it works (design)
 
