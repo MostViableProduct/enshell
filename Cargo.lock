@@ -37,6 +37,11 @@ version = "0.0.0"
 [[package]]
 name = "enshell-model"
 version = "0.0.0"
+dependencies = [
+ "enshell-intents",
+ "enshell-os",
+ "serde_json",
+]
 
 [[package]]
 name = "enshell-os"
