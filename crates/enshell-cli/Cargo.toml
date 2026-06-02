@@ -15,8 +15,17 @@ clap = { version = "4.6.1", features = ["derive"] }
 ctrlc = "3.5.2"
 enshell-core = { version = "0.0.0", path = "../enshell-core" }
 enshell-intents = { version = "0.0.0", path = "../enshell-intents" }
+enshell-llama = { version = "0.0.0", path = "../enshell-llama", optional = true }
 enshell-model = { version = "0.0.0", path = "../enshell-model" }
 enshell-os = { version = "0.0.0", path = "../enshell-os" }
 enshell-policy = { version = "0.0.0", path = "../enshell-policy" }
 enshell-telemetry = { version = "0.0.0", path = "../enshell-telemetry" }
 serde_json = "1.0.150"
+
+# The `llama` feature pulls in the real llama.cpp/Gemma 4 provider via
+# enshell-llama (which in turn enables its own `llama` feature, compiling
+# llama.cpp's C++ and requiring cmake). The default build does NOT pull in
+# enshell-llama's llama-cpp-2 dependency or any C++.
+[features]
+default = []
+llama = ["dep:enshell-llama", "enshell-llama/llama"]

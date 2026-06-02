@@ -92,6 +92,22 @@ pub trait ModelProvider {
     fn infer(&self, request: &ModelRequest) -> Result<String, ModelError>;
 }
 
+/// Forward [`ModelProvider`] through a boxed trait object.
+///
+/// The trait is object-safe, so the CLI can hold a `Box<dyn ModelProvider>`
+/// selected at runtime (stub vs. the real llama.cpp-backed provider) and still
+/// pass it to a generic `Orchestrator<P: ModelProvider>`. Each method simply
+/// re-dispatches to the contained provider.
+impl ModelProvider for Box<dyn ModelProvider> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn infer(&self, request: &ModelRequest) -> Result<String, ModelError> {
+        (**self).infer(request)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // StubProvider — deterministic stand-in
 // ---------------------------------------------------------------------------
@@ -310,6 +326,31 @@ mod tests {
     #[test]
     fn name_is_stub() {
         assert_eq!(StubProvider.name(), "stub");
+    }
+
+    // ------------------------------------------------------------------
+    // Box<dyn ModelProvider> delegation
+    // ------------------------------------------------------------------
+
+    /// A `Box<dyn ModelProvider>` must delegate `name()` and `infer()` to the
+    /// contained provider. This is what lets the CLI hold a runtime-selected
+    /// provider and still pass it to `Orchestrator<P: ModelProvider>`.
+    #[test]
+    fn boxed_provider_delegates_name_and_infer() {
+        let boxed: Box<dyn ModelProvider> = Box::new(StubProvider);
+
+        // name() forwards to the inner StubProvider.
+        assert_eq!(boxed.name(), "stub");
+
+        // infer() forwards too: the boxed result equals the direct result.
+        let request = req("what is using port 3000");
+        let via_box = boxed.infer(&request).expect("boxed infer ok");
+        let direct = StubProvider.infer(&request).expect("direct infer ok");
+        assert_eq!(via_box, direct, "boxed infer must match direct infer");
+
+        // And the boxed output still validates through the trust boundary.
+        let action = parse_model_output(&via_box).expect("boxed output validates");
+        assert_eq!(action.intent, Intent::FindProcessUsingPort { port: 3000 });
     }
 
     // ------------------------------------------------------------------

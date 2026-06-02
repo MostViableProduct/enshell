@@ -19,9 +19,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use std::path::Path;
+
 use clap::{Parser, Subcommand};
 use enshell_core::{display_command, Confirmation, CoreError, OrchestratorConfig, Prepared};
-use enshell_model::StubProvider;
+use enshell_model::{ModelProvider, StubProvider};
 use enshell_os::{current_os, ExecControl, ExecError};
 use enshell_policy::{
     auto_confirm_allowed, redact_text, redact_value, requires_typed_confirmation, RiskDecision,
@@ -149,9 +151,10 @@ fn main() {
         }
     };
 
-    // Build the orchestrator.
+    // Build the orchestrator with a runtime-selected model provider.
     let config = OrchestratorConfig { timeout };
-    let orch = enshell_core::Orchestrator::new(StubProvider, config);
+    let provider = build_provider();
+    let orch = enshell_core::Orchestrator::new(provider, config);
 
     // Phase 1: prepare (model → validate → policy → render).
     let prepared = match orch.prepare(&request) {
@@ -381,6 +384,171 @@ pub fn build_confirmation(decision: &RiskDecision, yes_flag: bool) -> Confirmati
 }
 
 // ---------------------------------------------------------------------------
+// Model-provider selection (pure decision + thin I/O wrappers)
+// ---------------------------------------------------------------------------
+
+/// Which model provider the CLI should use for this run.
+///
+/// The decision is made by [`choose_provider`] (pure) and realized by
+/// [`build_provider`] (does the actual I/O / provider construction).
+#[derive(Debug)]
+pub enum ProviderChoice {
+    /// Use the deterministic built-in [`StubProvider`].
+    Stub,
+    /// Use the real llama.cpp-backed provider loaded from this GGUF path.
+    Llama(PathBuf),
+}
+
+/// Decide which provider to use, given whether the binary was compiled with the
+/// `llama` feature and the resolved model path.
+///
+/// This function is **pure** (no I/O): it is fully unit-testable.
+///
+/// # Rules
+///
+/// - Not built with `llama` → [`ProviderChoice::Stub`] (the real provider's
+///   code isn't even compiled in, so a model path is irrelevant).
+/// - Built with `llama` and a model is present → [`ProviderChoice::Llama`].
+/// - Built with `llama` but no model found → [`ProviderChoice::Stub`]; the
+///   caller is expected to print [`guided_install_message`] so the user learns
+///   how to obtain a model.
+pub fn choose_provider(llama_built: bool, model: Option<PathBuf>) -> ProviderChoice {
+    match (llama_built, model) {
+        (false, _) => ProviderChoice::Stub,
+        (true, Some(path)) => ProviderChoice::Llama(path),
+        (true, None) => ProviderChoice::Stub,
+    }
+}
+
+/// Resolve the GGUF model path to use, if any, reading the real environment.
+///
+/// Thin wrapper over [`resolve_model_path_from`] that reads `$ENSHELL_MODEL`
+/// and `$HOME` from the process environment. See that function for the
+/// precedence rules. Never panics.
+pub fn resolve_model_path() -> Option<PathBuf> {
+    let env_val = std::env::var("ENSHELL_MODEL").ok();
+    let home = std::env::var("HOME").ok().map(PathBuf::from);
+    resolve_model_path_from(env_val.as_deref(), home.as_deref())
+}
+
+/// Pure core of [`resolve_model_path`]: resolve a model path from explicit
+/// inputs so it can be unit-tested without mutating global process env.
+///
+/// # Precedence
+///
+/// 1. `env_val` (the value of `$ENSHELL_MODEL`): if set **and** the file at that
+///    path exists, return it.
+/// 2. Otherwise the default location `<home>/.enshell/models/`: return the first
+///    `*.gguf` file found there (if `home` is provided and such a file exists).
+/// 3. Otherwise `None`.
+///
+/// Returns only paths that actually exist on disk. Never panics.
+pub fn resolve_model_path_from(env_val: Option<&str>, home: Option<&Path>) -> Option<PathBuf> {
+    // 1. Explicit override via $ENSHELL_MODEL, but only if the file exists.
+    if let Some(val) = env_val {
+        if !val.is_empty() {
+            let p = PathBuf::from(val);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+
+    // 2. Default location: <home>/.enshell/models/*.gguf — first match wins.
+    let home = home?;
+    let models_dir = home.join(".enshell").join("models");
+    let entries = std::fs::read_dir(&models_dir).ok()?;
+    let mut found: Option<PathBuf> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_gguf = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+        if is_gguf && path.is_file() {
+            // Deterministic: prefer the lexicographically smallest filename so
+            // selection does not depend on directory-iteration order.
+            match &found {
+                Some(existing) if existing <= &path => {}
+                _ => found = Some(path),
+            }
+        }
+    }
+    found
+}
+
+/// Informational, plain-English guidance on how to obtain the model.
+///
+/// This is **not** an auto-download — it describes the model, its source, its
+/// license, and where to place it / how to point enShell at it. Returned as a
+/// string (no I/O) so it is testable and the caller controls where it is
+/// printed.
+pub fn guided_install_message() -> String {
+    "No local model found — enShell is using its built-in deterministic stub.\n\
+     \n\
+     To enable the real assistant, install a model:\n\
+     \n\
+     \x20 Model:   Gemma 4 E4B Instruct (Q4 GGUF, e.g. Q4_K_M)\n\
+     \x20 Size:    a few GB to download (plan for ~16 GB RAM to run comfortably)\n\
+     \x20 Source:  Google's official Gemma resources — https://ai.google.dev/gemma\n\
+     \x20          (find the exact per-version GGUF on the official model card; \
+     enShell does not host or mirror the weights)\n\
+     \x20 License: Apache-2.0 — verify the terms on the model card for the exact\n\
+     \x20          version you download (see MODEL_LICENSES.md; earlier Gemma\n\
+     \x20          versions used different terms). Downloading the model means\n\
+     \x20          accepting that model's license.\n\
+     \n\
+     Then place the .gguf file in ~/.enshell/models/ (enShell picks it up\n\
+     automatically), or set ENSHELL_MODEL to its full path:\n\
+     \x20 export ENSHELL_MODEL=/path/to/gemma-4-e4b-instruct.Q4_K_M.gguf\n"
+        .to_owned()
+}
+
+/// Build the runtime model provider, doing the actual I/O and provider
+/// construction the pure [`choose_provider`] decision implies.
+///
+/// Returns a `Box<dyn ModelProvider>` so the caller can hold a runtime-selected
+/// provider regardless of which concrete type was chosen. Falls back to the
+/// [`StubProvider`] on any problem (feature off, no model, or load failure),
+/// printing a one-line note rather than failing — enShell stays usable.
+fn build_provider() -> Box<dyn ModelProvider> {
+    let llama_built = cfg!(feature = "llama");
+    match choose_provider(llama_built, resolve_model_path()) {
+        ProviderChoice::Stub => {
+            // Only nudge about installing a model when the real provider is
+            // actually compiled in; otherwise the stub is expected and silent.
+            if llama_built {
+                eprintln!("{}", guided_install_message());
+            }
+            Box::new(StubProvider) as Box<dyn ModelProvider>
+        }
+        ProviderChoice::Llama(path) => {
+            #[cfg(feature = "llama")]
+            {
+                match enshell_llama::LlamaProvider::new(&path) {
+                    Ok(p) => Box::new(p) as Box<dyn ModelProvider>,
+                    Err(e) => {
+                        eprintln!(
+                            "note: failed to load model at {}: {e}; using the built-in stub.",
+                            path.display()
+                        );
+                        Box::new(StubProvider) as Box<dyn ModelProvider>
+                    }
+                }
+            }
+            // Unreachable when the feature is off: choose_provider only returns
+            // Llama when llama_built is true. The branch exists so the function
+            // compiles cleanly under the default build with no unused warnings.
+            #[cfg(not(feature = "llama"))]
+            {
+                let _ = path;
+                Box::new(StubProvider) as Box<dyn ModelProvider>
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Output formatters (pure)
 // ---------------------------------------------------------------------------
 
@@ -498,7 +666,35 @@ fn run_doctor(timeout: Option<Duration>) {
     println!("enShell doctor — environment check");
     println!("-----------------------------------");
     println!("OS:              {os_name}");
-    println!("Model provider:  stub (deterministic; llama.cpp / Gemma 4 coming in Phase 1)");
+
+    // Model-provider status — resilient: no panics on missing model/env.
+    let llama_built = cfg!(feature = "llama");
+    println!(
+        "Built with llama feature: {}",
+        if llama_built { "yes" } else { "no" }
+    );
+    let resolved = resolve_model_path();
+    match &resolved {
+        Some(path) => {
+            println!("Model path:      {}", path.display());
+            println!("Model present:   yes");
+        }
+        None => {
+            println!("Model path:      none found");
+            println!("Model present:   no");
+        }
+    }
+    let provider_label = match choose_provider(llama_built, resolved) {
+        ProviderChoice::Llama(_) => "gemma-4 (llama.cpp)",
+        ProviderChoice::Stub => {
+            if llama_built {
+                "stub (no model found — run with a model installed for gemma-4/llama.cpp)"
+            } else {
+                "stub (deterministic; rebuild with --features llama for gemma-4/llama.cpp)"
+            }
+        }
+    };
+    println!("Model provider:  {provider_label}");
     println!("Adapters:        read-only adapters available for macOS and Linux");
     println!("Configured timeout: {timeout_str}");
 
@@ -540,7 +736,7 @@ fn run_doctor(timeout: Option<Duration>) {
     }
 
     println!("-----------------------------------");
-    println!("Everything looks good for the current stub-provider MVP.");
+    println!("Environment check complete.");
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,6 +1296,140 @@ mod tests {
         assert!(
             matches!(step, ConfirmationStep::NeedsTyped { .. }),
             "Destructive without --yes must need typed phrase, got {step:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // choose_provider: pure decision logic
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn choose_provider_not_built_with_model_is_stub() {
+        // Feature off → always Stub, even when a model path is present.
+        let choice = choose_provider(false, Some(PathBuf::from("/tmp/model.gguf")));
+        assert!(matches!(choice, ProviderChoice::Stub), "got {choice:?}");
+    }
+
+    #[test]
+    fn choose_provider_not_built_without_model_is_stub() {
+        let choice = choose_provider(false, None);
+        assert!(matches!(choice, ProviderChoice::Stub), "got {choice:?}");
+    }
+
+    #[test]
+    fn choose_provider_built_with_model_is_llama() {
+        let path = PathBuf::from("/tmp/model.gguf");
+        let choice = choose_provider(true, Some(path.clone()));
+        match choice {
+            ProviderChoice::Llama(p) => assert_eq!(p, path),
+            other => panic!("expected Llama({path:?}), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choose_provider_built_without_model_is_stub() {
+        // Feature on but no model → Stub (caller prints guided install info).
+        let choice = choose_provider(true, None);
+        assert!(matches!(choice, ProviderChoice::Stub), "got {choice:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_model_path_from: pure path resolution
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_model_path_env_points_at_real_file_returns_it() {
+        // Create a real temp file and point ENSHELL_MODEL at it.
+        let dir = std::env::temp_dir().join(format!("enshell-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let model = dir.join("model.gguf");
+        std::fs::write(&model, b"fake").expect("write");
+
+        let env_val = model.to_str();
+        let resolved = resolve_model_path_from(env_val, None);
+        assert_eq!(resolved.as_deref(), Some(model.as_path()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_model_path_env_points_at_nonexistent_returns_none() {
+        // A non-existent path must NOT be returned, and with no HOME → None.
+        let resolved = resolve_model_path_from(Some("/definitely/not/here/model.gguf"), None);
+        assert!(resolved.is_none(), "got {resolved:?}");
+    }
+
+    #[test]
+    fn resolve_model_path_unset_and_no_default_returns_none() {
+        // No env value and a HOME with no models dir → None.
+        let home = std::env::temp_dir().join(format!("enshell-empty-home-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("mkdir");
+        let resolved = resolve_model_path_from(None, Some(home.as_path()));
+        assert!(resolved.is_none(), "got {resolved:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_model_path_finds_gguf_in_default_dir() {
+        // A .gguf in <home>/.enshell/models/ should be discovered when env unset.
+        let home = std::env::temp_dir().join(format!("enshell-home-{}", std::process::id()));
+        let models = home.join(".enshell").join("models");
+        std::fs::create_dir_all(&models).expect("mkdir");
+        let model = models.join("gemma.gguf");
+        std::fs::write(&model, b"fake").expect("write");
+
+        let resolved = resolve_model_path_from(None, Some(home.as_path()));
+        assert_eq!(resolved.as_deref(), Some(model.as_path()));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_model_path_env_takes_precedence_over_default() {
+        // Both an env file and a default-dir file exist → env wins.
+        let home = std::env::temp_dir().join(format!("enshell-prec-{}", std::process::id()));
+        let models = home.join(".enshell").join("models");
+        std::fs::create_dir_all(&models).expect("mkdir");
+        let default_model = models.join("default.gguf");
+        std::fs::write(&default_model, b"fake").expect("write");
+        let env_model = home.join("override.gguf");
+        std::fs::write(&env_model, b"fake").expect("write");
+
+        let resolved = resolve_model_path_from(env_model.to_str(), Some(home.as_path()));
+        assert_eq!(resolved.as_deref(), Some(env_model.as_path()));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_model_path_ignores_non_gguf_in_default_dir() {
+        // A non-.gguf file in the default dir must not be selected.
+        let home = std::env::temp_dir().join(format!("enshell-nongguf-{}", std::process::id()));
+        let models = home.join(".enshell").join("models");
+        std::fs::create_dir_all(&models).expect("mkdir");
+        std::fs::write(models.join("README.txt"), b"not a model").expect("write");
+
+        let resolved = resolve_model_path_from(None, Some(home.as_path()));
+        assert!(resolved.is_none(), "got {resolved:?}");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // -----------------------------------------------------------------------
+    // guided_install_message: pure, informational
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn guided_install_message_mentions_model_env_and_license() {
+        let msg = guided_install_message();
+        assert!(msg.contains("Gemma 4"), "should name the model: {msg}");
+        assert!(
+            msg.contains("ENSHELL_MODEL"),
+            "should mention the env var: {msg}"
+        );
+        assert!(
+            msg.contains("Apache-2.0"),
+            "should state the license: {msg}"
         );
     }
 

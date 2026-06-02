@@ -293,6 +293,7 @@ dependencies = [
  "ctrlc",
  "enshell-core",
  "enshell-intents",
+ "enshell-llama",
  "enshell-model",
  "enshell-os",
  "enshell-policy",

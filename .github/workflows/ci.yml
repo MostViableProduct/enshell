@@ -94,8 +94,12 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      - name: Check enshell-llama with the llama feature
-        run: cargo check -p enshell-llama --features llama
+      - name: Check the llama-feature path (provider + CLI selection)
+        run: |
+          cargo check -p enshell-llama --features llama
+          cargo check -p enshell-cli --features llama
 
-      - name: Clippy enshell-llama with the llama feature
-        run: cargo clippy -p enshell-llama --features llama -- -D warnings
+      - name: Clippy the llama-feature path
+        run: |
+          cargo clippy -p enshell-llama --features llama -- -D warnings
+          cargo clippy -p enshell-cli --features llama -- -D warnings
