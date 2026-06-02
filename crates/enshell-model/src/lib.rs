@@ -6,6 +6,9 @@
 //! and [`StubProvider`], a deterministic stand-in used for testing and development
 //! before the real Gemma/llama.cpp provider is wired in.
 //!
+//! It also contains the [`prompt`] module which builds the text prompts fed to any
+//! provider, including the future Gemma 4 / llama.cpp backend.
+//!
 //! # Boundary contract
 //!
 //! [`ModelProvider::infer`] returns a **raw, untrusted JSON string** — the model's
@@ -16,6 +19,15 @@
 use enshell_intents::{Intent, ProposedAction, RiskHint};
 use enshell_os::Os;
 use std::fmt;
+
+// ---------------------------------------------------------------------------
+// Prompt-construction module
+// ---------------------------------------------------------------------------
+
+pub mod prompt;
+
+// Re-export the key items at crate root for ergonomic access.
+pub use prompt::{build_prompt, few_shot_examples, intent_tool_schema, system_prompt, Prompt};
 
 // ---------------------------------------------------------------------------
 // ModelRequest
