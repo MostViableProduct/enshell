@@ -81,30 +81,42 @@ pub fn redact_text(input: &str) -> (String, u32) {
 /// (a bare `{"password": "plainsecret"}` is caught). Values under non-sensitive
 /// keys are still scanned for inline secrets as usual.
 ///
-/// Returns the total number of redactions performed across all leaves.
+/// Returns the total number of redactions performed (string leaves replaced).
 pub fn redact_value(value: &mut Value) -> u32 {
+    redact_value_ctx(value, false)
+}
+
+/// Recursive worker. `sensitive` is the inherited "tainted" context: it becomes
+/// `true` once we descend through an object key matched by [`is_sensitive_key`],
+/// and stays `true` for that entire subtree (nested objects and arrays).
+///
+/// - In a sensitive context, every non-empty string leaf is redacted wholesale
+///   (so `{"token": ["plainsecret"]}` and `{"secret": {"v": "plainsecret"}}` are
+///   both caught, not just immediate string values).
+/// - Outside a sensitive context, each string leaf is scanned for inline secrets
+///   via [`redact_text`].
+fn redact_value_ctx(value: &mut Value, sensitive: bool) -> u32 {
     match value {
         Value::String(s) => {
-            let (redacted, count) = redact_text(s);
-            *s = redacted;
-            count
+            if sensitive {
+                if !s.is_empty() && s != MARKER {
+                    *s = MARKER.to_string();
+                    1
+                } else {
+                    0
+                }
+            } else {
+                let (redacted, count) = redact_text(s);
+                *s = redacted;
+                count
+            }
         }
-        Value::Array(arr) => arr.iter_mut().map(redact_value).sum(),
+        Value::Array(arr) => arr.iter_mut().map(|v| redact_value_ctx(v, sensitive)).sum(),
         Value::Object(map) => {
             let mut count = 0;
             for (key, val) in map.iter_mut() {
-                // Key-aware: a sensitive key with a (non-empty, not-already-
-                // redacted) string value → redact the whole value.
-                if is_sensitive_key(key) {
-                    if let Value::String(s) = val {
-                        if !s.is_empty() && s != MARKER {
-                            *s = MARKER.to_string();
-                            count += 1;
-                            continue;
-                        }
-                    }
-                }
-                count += redact_value(val);
+                let child_sensitive = sensitive || is_sensitive_key(key);
+                count += redact_value_ctx(val, child_sensitive);
             }
             count
         }
@@ -113,10 +125,35 @@ pub fn redact_value(value: &mut Value) -> u32 {
     }
 }
 
-/// True if `key` (case-insensitive) is one of the [`SENSITIVE_KEYS`].
+/// True if an object key denotes a secret. The key is normalized (lowercased,
+/// with `_`/`-`/other non-alphanumerics stripped) and tested for a sensitive
+/// substring, so variants like `refresh_token`, `accessToken`, `bearer_token`,
+/// `session_token`, `github_token`, and `Api_Key` all match. The substrings
+/// deliberately avoid a bare `key` (which would catch `monkey`, `keyboard`).
 fn is_sensitive_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    SENSITIVE_KEYS.contains(&lower.as_str())
+    const SENSITIVE_KEY_SUBSTRINGS: &[&str] = &[
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "apikey",
+        "accesskey",
+        "secretkey",
+        "privatekey",
+        "clientsecret",
+        "credential",
+        "authorization",
+        "authtoken",
+    ];
+    let normalized: String = key
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    SENSITIVE_KEY_SUBSTRINGS
+        .iter()
+        .any(|needle| normalized.contains(needle))
 }
 
 // ---------------------------------------------------------------------------
@@ -776,6 +813,68 @@ mod tests {
         assert_eq!(count, 0);
         assert_eq!(val["path"], json!("/Users/me/Downloads"));
         assert_eq!(val["name"], json!("report"));
+    }
+
+    #[test]
+    fn redact_value_matches_sensitive_key_variants() {
+        // camelCase, _token suffixes, github_token, etc. — all should match.
+        let mut val = json!({
+            "refresh_token": "plain1",
+            "accessToken": "plain2",
+            "bearer_token": "plain3",
+            "session_token": "plain4",
+            "github_token": "plain5",
+            "client_secret": "plain6",
+        });
+        let count = redact_value(&mut val);
+        assert_eq!(
+            count, 6,
+            "all six sensitive-key variants should be redacted"
+        );
+        for k in [
+            "refresh_token",
+            "accessToken",
+            "bearer_token",
+            "session_token",
+            "github_token",
+            "client_secret",
+        ] {
+            assert_eq!(
+                val[k].as_str(),
+                Some(MARKER),
+                "{k} value should be redacted"
+            );
+        }
+    }
+
+    #[test]
+    fn is_sensitive_key_avoids_bare_key_false_positives() {
+        // Keys containing "key" as part of a normal word must NOT be treated
+        // as sensitive (no bare "key" substring in the match list).
+        let mut val = json!({ "monkey": "banana", "keyboard": "qwerty", "description": "hi" });
+        let count = redact_value(&mut val);
+        assert_eq!(count, 0);
+        assert_eq!(val["monkey"], json!("banana"));
+        assert_eq!(val["keyboard"], json!("qwerty"));
+    }
+
+    #[test]
+    fn redact_value_sensitive_key_taints_nested_array_and_object() {
+        // A sensitive parent key taints its WHOLE subtree, so bare secrets in
+        // nested arrays/objects are redacted even though they match no pattern.
+        let mut val = json!({
+            "token": ["plainsecret", "another"],
+            "secret": { "value": "plainsecret", "nested": { "deep": "x" } },
+            "safe": { "note": "just a normal note" }
+        });
+        let count = redact_value(&mut val);
+        // 2 (array) + 2 (secret subtree: value + deep) = 4; "safe" untouched.
+        assert_eq!(count, 4);
+        assert_eq!(val["token"][0].as_str(), Some(MARKER));
+        assert_eq!(val["token"][1].as_str(), Some(MARKER));
+        assert_eq!(val["secret"]["value"].as_str(), Some(MARKER));
+        assert_eq!(val["secret"]["nested"]["deep"].as_str(), Some(MARKER));
+        assert_eq!(val["safe"]["note"], json!("just a normal note"));
     }
 
     #[test]

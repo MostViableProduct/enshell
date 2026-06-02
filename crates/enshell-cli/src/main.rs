@@ -569,7 +569,9 @@ pub fn default_audit_log_path() -> Option<PathBuf> {
 /// Build an [`AuditRecord`] from an [`enshell_core::Actionable`] for any terminal outcome.
 ///
 /// Redacts `user_request`, `command_plan`, and `params` before storage. The
-/// `redaction_count` field reflects the total number of secret spans removed.
+/// `redaction_count` field is the number of redactions applied: inline secret
+/// spans removed from text, plus whole values redacted under sensitive JSON keys
+/// (one per redacted value, not per span).
 ///
 /// # Parameters
 /// - `outcome`: the typed [`AuditOutcome`] for this event.
