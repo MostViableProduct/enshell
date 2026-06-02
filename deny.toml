@@ -92,10 +92,18 @@ ignore = [
 # A new dependency with any other license will fail `cargo deny check`, forcing a
 # deliberate review + addition here (this is intentional for a security-focused project).
 allow = [
-    "Apache-2.0",   # enShell's own crates + most of the serde tree
-    "MIT",          # serde tree, zmij, memchr (dual)
-    "Unicode-3.0",  # unicode-ident
-    "Unlicense",    # memchr (Unlicense OR MIT)
+    "Apache-2.0",                    # enShell's own crates + most of the serde tree
+    "MIT",                           # serde tree, zmij, memchr (dual)
+    "Unicode-3.0",                   # unicode-ident
+    "Unlicense",                     # memchr (Unlicense OR MIT)
+    # Added for the optional `llama` feature tree (llama-cpp-2 / bindgen). All
+    # permissive. Vetted: the only copyleft seen (r-efi's `LGPL-2.1-or-later`) is
+    # an OR alternative satisfied by MIT/Apache and is UEFI-target-gated, so LGPL
+    # is deliberately NOT allowed. cargo deny is run with --all-features so this
+    # feature tree is actually scanned.
+    "BSD-3-Clause",                  # bindgen, encoding_rs
+    "ISC",                           # libloading
+    "Apache-2.0 WITH LLVM-exception", # wit-bindgen, wasip2 (wasm-target-gated)
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the

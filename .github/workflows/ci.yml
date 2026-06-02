@@ -67,5 +67,8 @@ jobs:
         with:
           tool: cargo-deny@0.19.8
 
+      # --all-features so optional feature trees (e.g. the `llama` FFI provider's
+      # llama-cpp-2 dependency) are actually scanned, not skipped. This reads
+      # cargo metadata only — it does NOT build llama.cpp's C++.
       - name: License / advisory / bans / sources check
-        run: cargo deny check
+        run: cargo deny --all-features check
