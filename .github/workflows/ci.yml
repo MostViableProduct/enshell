@@ -72,3 +72,30 @@ jobs:
       # cargo metadata only — it does NOT build llama.cpp's C++.
       - name: License / advisory / bans / sources check
         run: cargo deny --all-features check
+
+  # Compile-checks the optional `llama` FFI provider so it cannot rot unnoticed
+  # (the default jobs above deliberately keep llama.cpp's C++ out). ubuntu-only
+  # (cheapest) and cached — the heavy llama-cpp-sys-2 C++ build only re-runs when
+  # the dependency tree changes; otherwise this is a fast `cargo check`.
+  llama-feature:
+    name: llama feature (FFI) compile check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install cmake (llama.cpp build dependency)
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check enshell-llama with the llama feature
+        run: cargo check -p enshell-llama --features llama
+
+      - name: Clippy enshell-llama with the llama feature
+        run: cargo clippy -p enshell-llama --features llama -- -D warnings

@@ -71,6 +71,11 @@ mod provider {
     /// asked to emit a single small JSON object, so this is generous but bounded.
     const MAX_GENERATED_TOKENS: usize = 1024;
 
+    /// Headroom reserved in the context window for the model's response. A prompt
+    /// is rejected unless at least this many tokens remain for generation, so a
+    /// long prompt cannot leave the model with no room to emit a complete intent.
+    const MIN_RESPONSE_TOKENS: usize = 256;
+
     /// Errors specific to the llama.cpp-backed provider.
     ///
     /// Each variant maps cleanly to [`ModelError::InferenceFailed`] via the
@@ -246,6 +251,11 @@ mod provider {
             let inner = &mut *guard;
             let ctx = &mut inner.context;
 
+            // The context is reused across calls, so reset the KV cache before each
+            // inference — otherwise request N+1 would inherit request N's sequence
+            // state, hurting correctness and determinism.
+            ctx.clear_kv_cache();
+
             // Tokenize the prompt, adding a BOS token at the start.
             let tokens = self
                 .model
@@ -258,10 +268,13 @@ mod provider {
                 ));
             }
 
+            // Reject prompts that leave no room for a response: require at least
+            // MIN_RESPONSE_TOKENS of generation headroom within the context window.
             let n_ctx = ctx.n_ctx() as usize;
-            if tokens.len() >= n_ctx {
+            if tokens.len() + MIN_RESPONSE_TOKENS >= n_ctx {
                 return Err(LlamaError::Config(format!(
-                    "prompt is {} tokens but context window is {n_ctx}",
+                    "prompt is {} tokens; with {MIN_RESPONSE_TOKENS} reserved for the \
+                     response that exceeds the {n_ctx}-token context window",
                     tokens.len()
                 )));
             }
