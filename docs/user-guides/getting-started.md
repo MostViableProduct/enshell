@@ -22,8 +22,9 @@ enShell is in **early development**. Today it:
 - Runs **read-only** diagnostics only, on **macOS and Linux**.
 - Interprets requests with a built-in **deterministic stub model** by default — no
   model download, no network, works out of the box.
-- Recognises a small set of request families (below). Anything else gets a
-  clarifying question, never a guess.
+- Recognises a small set of request families (below). Anything else is handled
+  safely — a clarifying question when it's unrecognised, or a refusal when it maps to
+  a known but not-yet-supported action (e.g. a package install). It never guesses.
 
 It does **not** yet run write/system actions, support Windows, or perform live
 inference with a downloaded Gemma model. See [Not yet available](#not-yet-available).
@@ -98,7 +99,9 @@ enshell history              Show past actions from the local audit log.
 ```
 
 `--dry-run` is the safe way to see exactly what a request would run without
-running it.
+running it. It (and `--plan`) produce output only for executable **read-only**
+actions; a request that maps to a not-yet-supported write/system action is refused
+outright, so there is no plan to show.
 
 **What `--yes` does — and does not do.** `--yes` pre-authorises confirmation for
 **read-only** actions only. It does **not** auto-confirm `open` (which always
@@ -127,7 +130,10 @@ Notes:
 - The pipelines/sequences above are *display renderings*. enShell executes them as
   structured argv steps through OS pipes — **never** via a shell (`sh -c`). See
   [the safety model](../security/safety-model.md#no-shell-by-construction).
-- Anything outside these families returns a clarifying question rather than a guess.
+- A request that doesn't map to a supported read-only action is handled safely:
+  a clarifying question when it's unrecognised, or a refusal when it maps to a known
+  but not-yet-supported action (e.g. a package install). enShell never guesses into
+  executing.
 
 ## Using the real Gemma 4 model (optional, experimental)
 

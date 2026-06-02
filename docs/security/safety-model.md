@@ -46,9 +46,12 @@ tiers run from `ReadOnly` through `LocalWrite` (create-only / mutating),
 `PackageSystemChange`, `NetworkAccess`, `SecretsSensitive`, `Destructive`, and
 `Privileged`, plus `UnsupportedAmbiguous`. The full table is plan §4.
 
-**In the current MVP, only `ReadOnly` intents execute.** Everything above that tier
-is recognised, classified, and **refused** (it may still be previewed with
-`--dry-run`/`--plan`). This is enforced in code by the MVP gate, not by convention.
+**In the current MVP, only `ReadOnly` intents execute.** Anything above that tier is
+recognised and classified, then **refused before any command is rendered** — you get
+a short "I can't do that yet" message, not a plan or preview. (`--dry-run` and
+`--plan` therefore apply only to executable `ReadOnly` actions; the design goal of
+previewing higher-tier actions is a later phase, not current behavior.) This is
+enforced in code by the MVP gate, not by convention.
 
 ## Confirmation Invariant
 
@@ -111,12 +114,17 @@ are never persisted.
 
 ## Privacy
 
-Context capture is **privacy-minimal by default**: enShell uses only environment
-facts (OS, shell type, working directory path, last exit code) and its own history.
-The literal text of past commands, stdout/stderr, full shell history, and an
-environment summary are **opt-in**; environment variable *values*, file contents,
-secrets, tokens, SSH keys, and clipboard contents are **never** captured. Inference
-is local by default — nothing leaves your machine. (See plan §9 for the full policy.)
+Context capture is **privacy-minimal by default**. Today the request handed to the
+model (`ModelRequest`) carries only your **request text**, the detected **OS**, and
+the **current working directory** path — nothing else. The additional environment
+facts the design calls for (shell type, last exit code, enShell's own history)
+require the shell-integration layer and are **planned, not yet captured**.
+
+By design, the literal text of past commands, stdout/stderr, full shell history, and
+an environment summary will be **opt-in**; environment variable *values*, file
+contents, secrets, tokens, SSH keys, and clipboard contents are **never** captured.
+Inference is local by default — nothing leaves your machine. (See plan §9 for the
+full policy.)
 
 ## Reporting a vulnerability
 
