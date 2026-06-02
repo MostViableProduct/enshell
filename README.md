@@ -58,7 +58,16 @@ intent and still goes through the identical policy → render → confirm gate; 
 only declines (handing off to the model) when a request carries parameters it
 shouldn't guess at.
 
-📄 **Full plan:** [`docs/planning/enshell-ai-native-shell-plan.md`](docs/planning/enshell-ai-native-shell-plan.md)
+## Documentation
+
+- 🚀 **[Getting started](docs/user-guides/getting-started.md)** — install, the
+  request families that work today, commands & flags, and the three resolution
+  paths (fast-path / stub / llama). *Authoritative for current behavior.*
+- 🛡️ **[Safety model](docs/security/safety-model.md)** — the trust boundary, risk
+  tiers, the Confirmation Invariant, the no-shell executor, and the audit log.
+- 📄 **[Full plan](docs/planning/enshell-ai-native-shell-plan.md)** — the complete
+  design, roadmap, and rationale. *Authoritative for the vision.*
+- 🔒 **[`SECURITY.md`](SECURITY.md)** — reporting a vulnerability.
 
 ## Planned highlights
 
