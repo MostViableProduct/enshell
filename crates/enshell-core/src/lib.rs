@@ -80,6 +80,14 @@ impl<P: ModelProvider> Orchestrator<P> {
         Orchestrator { provider, config }
     }
 
+    /// The active provider's name (e.g. `"stub"`, `"gemma-4 (llama.cpp)"`).
+    ///
+    /// Callers use this to record which model actually produced an intent in the
+    /// audit log, rather than assuming a fixed value.
+    pub fn provider_name(&self) -> &str {
+        self.provider.name()
+    }
+
     /// Phase 1: natural language → model → **validate untrusted output** →
     /// policy → render → preview.
     ///

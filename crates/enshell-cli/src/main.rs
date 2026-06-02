@@ -39,6 +39,12 @@ use enshell_telemetry::{AuditLog, AuditOutcome, AuditRecord, StoredEntry};
 /// Increment when the policy ruleset changes in a breaking way.
 const POLICY_VERSION: u32 = 1;
 
+/// Prompt-template version recorded in the audit log. This is the version of the
+/// `enshell-model` prompt scaffold (`system_prompt` + tool schema + few-shots),
+/// which is provider-independent — the stub ignores it, the llama provider uses
+/// it — so it is keyed to the template, not to which model ran.
+const PROMPT_TEMPLATE_VERSION: &str = "v1";
+
 // ---------------------------------------------------------------------------
 // CLI shape (clap derive)
 // ---------------------------------------------------------------------------
@@ -155,6 +161,10 @@ fn main() {
     let config = OrchestratorConfig { timeout };
     let provider = build_provider();
     let orch = enshell_core::Orchestrator::new(provider, config);
+    // The provider that actually produced the intent — recorded verbatim in
+    // every audit record below so the log reflects `stub` vs the real model,
+    // never a hardcoded assumption.
+    let model_id = orch.provider_name().to_owned();
 
     // Phase 1: prepare (model → validate → policy → render).
     let prepared = match orch.prepare(&request) {
@@ -181,7 +191,7 @@ fn main() {
             intent_name,
         } => {
             // Audit the refusal before printing — security-relevant event.
-            append_audit_record_raw(audit_record_for_refused(&request, &intent_name));
+            append_audit_record_raw(audit_record_for_refused(&request, &intent_name, &model_id));
             println!("I can't do that yet: {reason}");
         }
         Prepared::Actionable(actionable) => {
@@ -228,6 +238,7 @@ fn main() {
                                 AuditOutcome::Denied,
                                 "interactive",
                                 None,
+                                &model_id,
                             ));
                             println!("Okay — not running.");
                             return;
@@ -243,6 +254,7 @@ fn main() {
                                 AuditOutcome::Denied,
                                 "typed",
                                 None,
+                                &model_id,
                             ));
                             println!("Okay — not running.");
                             return;
@@ -289,6 +301,7 @@ fn main() {
                         AuditOutcome::Ok,
                         &record.confirmation_mode,
                         record.exit_code,
+                        &model_id,
                     ));
                     let output_str = format_success(&record);
                     println!("{output_str}");
@@ -299,6 +312,7 @@ fn main() {
                         AuditOutcome::Denied,
                         &exec_confirmation_mode,
                         None,
+                        &model_id,
                     ));
                     eprintln!("I need explicit confirmation to do that; nothing was run.");
                     std::process::exit(1);
@@ -309,6 +323,7 @@ fn main() {
                         AuditOutcome::Aborted,
                         &exec_confirmation_mode,
                         None,
+                        &model_id,
                     ));
                     eprintln!("Cancelled. Nothing further was run.");
                     std::process::exit(1);
@@ -319,6 +334,7 @@ fn main() {
                         AuditOutcome::Aborted,
                         &exec_confirmation_mode,
                         None,
+                        &model_id,
                     ));
                     eprintln!("That took too long and was stopped (timed out).");
                     std::process::exit(1);
@@ -329,6 +345,7 @@ fn main() {
                         AuditOutcome::Error,
                         &exec_confirmation_mode,
                         None,
+                        &model_id,
                     ));
                     let recovery = recovery_guidance(&e);
                     eprintln!("That didn't work: {e}");
@@ -677,15 +694,25 @@ fn run_doctor(timeout: Option<Duration>) {
     match &resolved {
         Some(path) => {
             println!("Model path:      {}", path.display());
-            println!("Model present:   yes");
+            // A file exists at the path; doctor does NOT load it (a multi-GB load
+            // would be slow, and a corrupt/incompatible file only fails at load
+            // time). So this is a candidate, not a verified-loadable model.
+            println!("Model file found: yes (not load-verified)");
         }
         None => {
             println!("Model path:      none found");
-            println!("Model present:   no");
+            println!("Model file found: no");
         }
     }
     let provider_label = match choose_provider(llama_built, resolved) {
-        ProviderChoice::Llama(_) => "gemma-4 (llama.cpp)",
+        // A model file was found, so the llama provider is the one that WOULD be
+        // selected — but doctor hasn't loaded it. Say so explicitly rather than
+        // implying gemma-4 is confirmed working: at run time a load failure falls
+        // back to the stub (see build_provider).
+        ProviderChoice::Llama(_) => {
+            "gemma-4 (llama.cpp) — model candidate found; load not checked \
+             (falls back to stub if the model fails to load at run time)"
+        }
         ProviderChoice::Stub => {
             if llama_built {
                 "stub (no model found — run with a model installed for gemma-4/llama.cpp)"
@@ -694,7 +721,7 @@ fn run_doctor(timeout: Option<Duration>) {
             }
         }
     };
-    println!("Model provider:  {provider_label}");
+    println!("Selected provider: {provider_label}");
     println!("Adapters:        read-only adapters available for macOS and Linux");
     println!("Configured timeout: {timeout_str}");
 
@@ -778,6 +805,7 @@ pub fn audit_record_for_action(
     outcome: AuditOutcome,
     confirmation_mode: &str,
     exit_code: Option<i32>,
+    model_id: &str,
 ) -> AuditRecord {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -801,9 +829,9 @@ pub fn audit_record_for_action(
         timestamp,
         policy_version: POLICY_VERSION,
         intent_schema_version: enshell_intents::SCHEMA_VERSION,
-        model_id: "stub".to_owned(),
+        model_id: model_id.to_owned(),
         model_quant: None,
-        prompt_template_version: "stub-1".to_owned(),
+        prompt_template_version: PROMPT_TEMPLATE_VERSION.to_owned(),
         intent: intent_display_name(actionable).to_owned(),
         params,
         risk_tier: format!("{:?}", decision.tier),
@@ -819,7 +847,11 @@ pub fn audit_record_for_action(
 ///
 /// Redacts the `user_request`. `params` is `Null`, `command_plan` is empty,
 /// `risk_tier` is `"n/a"`, `confirmation_mode` is `"none"`, `outcome` is `"refused"`.
-pub fn audit_record_for_refused(user_request: &str, intent_name: &str) -> AuditRecord {
+pub fn audit_record_for_refused(
+    user_request: &str,
+    intent_name: &str,
+    model_id: &str,
+) -> AuditRecord {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -835,9 +867,9 @@ pub fn audit_record_for_refused(user_request: &str, intent_name: &str) -> AuditR
         timestamp,
         policy_version: POLICY_VERSION,
         intent_schema_version: enshell_intents::SCHEMA_VERSION,
-        model_id: "stub".to_owned(),
+        model_id: model_id.to_owned(),
         model_quant: None,
-        prompt_template_version: "stub-1".to_owned(),
+        prompt_template_version: PROMPT_TEMPLATE_VERSION.to_owned(),
         intent: intent_name.to_owned(),
         params: serde_json::Value::Null,
         risk_tier: "n/a".to_owned(),
@@ -1586,7 +1618,7 @@ mod tests {
     #[test]
     fn audit_record_for_action_maps_fields_correctly() {
         let actionable = make_actionable_find_port();
-        let audit = audit_record_for_action(&actionable, AuditOutcome::Ok, "yes", Some(0));
+        let audit = audit_record_for_action(&actionable, AuditOutcome::Ok, "yes", Some(0), "stub");
 
         assert_eq!(audit.intent, "find_process_using_port");
         assert_eq!(audit.risk_tier, "ReadOnly");
@@ -1597,7 +1629,7 @@ mod tests {
         assert_eq!(audit.outcome, AuditOutcome::Ok);
         assert_eq!(audit.model_id, "stub");
         assert!(audit.model_quant.is_none());
-        assert_eq!(audit.prompt_template_version, "stub-1");
+        assert_eq!(audit.prompt_template_version, "v1");
         assert_eq!(audit.intent_schema_version, enshell_intents::SCHEMA_VERSION);
         assert_eq!(audit.policy_version, POLICY_VERSION);
         // Normal request contains no secrets → redaction_count == 0.
@@ -1610,10 +1642,26 @@ mod tests {
         assert!(!audit.timestamp.is_empty());
     }
 
+    /// Regression guard: the audit record must record the *actual* provider that
+    /// produced the intent, not a hardcoded `"stub"`. When the llama provider is
+    /// selected, its name must reach the log verbatim — for both the action and
+    /// refusal paths.
+    #[test]
+    fn audit_records_carry_the_real_provider_name() {
+        let llama = "gemma-4 (llama.cpp)";
+        let actionable = make_actionable_find_port();
+
+        let action = audit_record_for_action(&actionable, AuditOutcome::Ok, "yes", Some(0), llama);
+        assert_eq!(action.model_id, llama);
+
+        let refused = audit_record_for_refused("install ripgrep", "install_package", llama);
+        assert_eq!(refused.model_id, llama);
+    }
+
     #[test]
     fn audit_record_for_action_params_are_not_null() {
         let actionable = make_actionable_find_port();
-        let audit = audit_record_for_action(&actionable, AuditOutcome::Ok, "yes", Some(0));
+        let audit = audit_record_for_action(&actionable, AuditOutcome::Ok, "yes", Some(0), "stub");
         // params should be a non-null JSON value (the intent's fields)
         assert!(!audit.params.is_null(), "params should not be null");
     }
@@ -1621,7 +1669,13 @@ mod tests {
     #[test]
     fn audit_record_for_action_denied_outcome() {
         let actionable = make_actionable_find_port();
-        let audit = audit_record_for_action(&actionable, AuditOutcome::Denied, "interactive", None);
+        let audit = audit_record_for_action(
+            &actionable,
+            AuditOutcome::Denied,
+            "interactive",
+            None,
+            "stub",
+        );
         assert_eq!(audit.outcome, AuditOutcome::Denied);
         assert_eq!(audit.confirmation_mode, "interactive");
         assert!(audit.exit_code.is_none());
@@ -1630,7 +1684,8 @@ mod tests {
     #[test]
     fn audit_record_for_action_aborted_outcome() {
         let actionable = make_actionable_find_port();
-        let audit = audit_record_for_action(&actionable, AuditOutcome::Aborted, "yes", None);
+        let audit =
+            audit_record_for_action(&actionable, AuditOutcome::Aborted, "yes", None, "stub");
         assert_eq!(audit.outcome, AuditOutcome::Aborted);
         assert!(audit.exit_code.is_none());
     }
@@ -1638,7 +1693,7 @@ mod tests {
     #[test]
     fn audit_record_for_action_error_outcome() {
         let actionable = make_actionable_find_port();
-        let audit = audit_record_for_action(&actionable, AuditOutcome::Error, "yes", None);
+        let audit = audit_record_for_action(&actionable, AuditOutcome::Error, "yes", None, "stub");
         assert_eq!(audit.outcome, AuditOutcome::Error);
     }
 
@@ -1656,7 +1711,7 @@ mod tests {
         // through unchanged (no secrets → count 0), and by testing redaction
         // on the refused path (see audit_record_for_refused_redacts_secret).
         let actionable = make_actionable_find_port();
-        let audit = audit_record_for_action(&actionable, AuditOutcome::Ok, "yes", Some(0));
+        let audit = audit_record_for_action(&actionable, AuditOutcome::Ok, "yes", Some(0), "stub");
         // Plain request → no redaction.
         assert_eq!(audit.redaction_count, 0);
         assert_eq!(audit.user_request, "what is using port 3000");
@@ -1669,7 +1724,7 @@ mod tests {
         // in source (avoids tripping secret-scanning push protection on a fake token).
         let token = format!("ghp_{}", "a".repeat(36));
         let request = format!("deploy with token {token}");
-        let audit = audit_record_for_refused(&request, "install_package");
+        let audit = audit_record_for_refused(&request, "install_package", "stub");
 
         assert!(
             audit.redaction_count >= 1,
@@ -1692,7 +1747,7 @@ mod tests {
 
     #[test]
     fn audit_record_for_refused_plain_request_no_redaction() {
-        let audit = audit_record_for_refused("install ripgrep", "install_package");
+        let audit = audit_record_for_refused("install ripgrep", "install_package", "stub");
         assert_eq!(audit.outcome, AuditOutcome::Refused);
         assert_eq!(audit.redaction_count, 0);
         assert_eq!(audit.user_request, "install ripgrep");

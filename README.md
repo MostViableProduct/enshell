@@ -16,9 +16,10 @@ enshell "why did the last command fail?"
 
 ## Status
 
-**Early development.** A working **read-only MVP** runs end to end behind a
-**deterministic stub model** (the real Gemma 4 / llama.cpp provider is not wired
-yet). The `enshell` binary builds and runs:
+**Early development.** A working **read-only MVP** runs end to end. The default
+build interprets requests with a **deterministic stub model** (no C++, no model
+download) so the CLI works out of the box and CI stays hermetic. The `enshell`
+binary builds and runs:
 
 ```bash
 enshell --dry-run "what is using port 3000"   # preview the plan + command, run nothing
@@ -31,9 +32,16 @@ It recognizes a curated set of read-only requests (process-on-port, large files,
 system health, logs, open), previews them in plain English, asks for confirmation,
 executes via a no-shell command executor, and records each run to a local,
 **tamper-evident (hash-chained) audit log** surfaced by `enshell history`.
-Natural-language understanding is currently a deterministic stub, and write/system
-actions are designed but not yet executable (read-only only). Not a finished
-product.
+
+The real **Gemma 4 / llama.cpp provider is now wired** behind an optional `llama`
+Cargo feature: when you build with `--features llama` and a GGUF model is present
+(via `$ENSHELL_MODEL` or the default path), the CLI selects it at runtime and falls
+back to the stub if no model is found. This path is **compile-verified in CI on
+macOS and Linux**, but **live inference against a real model has not yet been
+verified end to end** — treat the llama provider as wired-but-unproven for now
+(`enshell doctor` reports it as a *candidate*, since it doesn't load the weights).
+Write/system actions are designed but not yet executable (read-only only). Not a
+finished product.
 
 ## How it works (design)
 
