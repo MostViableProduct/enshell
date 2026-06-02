@@ -48,9 +48,24 @@ use enshell_policy::{
     ClassifyContext, RiskDecision, RiskTier,
 };
 
+pub mod fastpath;
+pub use fastpath::fast_path_match;
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/// Where a prepared intent came from — recorded in the audit log so it reflects
+/// reality rather than assuming the configured provider always ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntentSource {
+    /// Resolved deterministically by [`fast_path_match`] — **no model call**.
+    /// Audited as `model_id = "fast_path"`.
+    FastPath,
+    /// Produced by the [`ModelProvider`] (e.g. the stub or the llama.cpp backend).
+    /// Audited with that provider's name.
+    Model,
+}
 
 /// Configuration for the [`Orchestrator`].
 pub struct OrchestratorConfig {
@@ -108,6 +123,15 @@ impl<P: ModelProvider> Orchestrator<P> {
     /// Only after passing both checks is the typed [`Intent`] used for policy
     /// classification and adapter rendering.
     pub fn prepare(&self, user_request: &str) -> Result<Prepared, CoreError> {
+        // Step 0: deterministic fast path (§13). A known phrasing resolves to a
+        // **trusted, typed** intent with NO model call. It still flows through the
+        // same classify → MVP-gate → render → preview pipeline below; the only
+        // thing it skips is the untrusted-output validator (it produces no
+        // untrusted string). Tagged `IntentSource::FastPath` for the audit log.
+        if let Some((intent, explanation)) = fast_path_match(user_request) {
+            return finish_prepare(intent, explanation, user_request, IntentSource::FastPath);
+        }
+
         // Step 1: build the model request with privacy-minimal context.
         let req = ModelRequest {
             user_request: user_request.to_owned(),
@@ -128,48 +152,13 @@ impl<P: ModelProvider> Orchestrator<P> {
             return Ok(Prepared::Clarify { question, options });
         }
 
-        // Step 5: policy classify.
-        let decision = classify(&action.intent, &ClassifyContext::default());
-
-        // Step 6: check MVP executability and adapter renderability.
-        let os = current_os();
-        if !is_mvp_executable(&decision) || !is_renderable(&action.intent, os) {
-            let intent_name = intent_name(&action.intent).to_owned();
-            let reason = if !is_mvp_executable(&decision) {
-                format!(
-                    "the '{}' intent is not executable in the read-only MVP (tier: {:?})",
-                    intent_name, decision.tier
-                )
-            } else {
-                format!(
-                    "no command is available for '{}' on this OS ({:?})",
-                    intent_name, os
-                )
-            };
-            return Ok(Prepared::Refused {
-                intent_name,
-                reason,
-            });
-        }
-
-        // Step 7: render into a CommandPlan (adapter converts intent to structured command).
-        let plan = render(&action.intent, os).map_err(CoreError::Adapter)?;
-
-        // Build a plain-English preview: explanation + risk label + literal command.
-        let risk_label = risk_label(&decision.tier);
-        let cmd_display = display_command(&plan);
-        let preview = format!(
-            "{}\nRisk: {}.\nCommand: {}",
-            action.explanation, risk_label, cmd_display
-        );
-
-        Ok(Prepared::Actionable(Actionable {
-            intent: action.intent,
-            decision,
-            plan,
-            preview,
-            user_request: user_request.to_owned(),
-        }))
+        // Steps 5–7: classify, MVP-gate, render, preview (shared with the fast path).
+        finish_prepare(
+            action.intent,
+            &action.explanation,
+            user_request,
+            IntentSource::Model,
+        )
     }
 
     /// Phase 2: execute an [`Actionable`] **only** if confirmation satisfies the
@@ -265,6 +254,60 @@ impl<P: ModelProvider> Orchestrator<P> {
     }
 }
 
+/// Shared Phase-1 tail: classify → MVP-gate → render → build preview.
+///
+/// Both the fast path and the model path converge here, so a fast-path intent
+/// and a model-produced intent are subjected to the *identical* policy and
+/// rendering gate — only the `source` (recorded for the audit log) differs.
+fn finish_prepare(
+    intent: Intent,
+    explanation: &str,
+    user_request: &str,
+    source: IntentSource,
+) -> Result<Prepared, CoreError> {
+    // Policy classify (authoritative risk tier).
+    let decision = classify(&intent, &ClassifyContext::default());
+
+    // MVP executability + adapter renderability.
+    let os = current_os();
+    if !is_mvp_executable(&decision) || !is_renderable(&intent, os) {
+        let intent_name = intent_name(&intent).to_owned();
+        let reason = if !is_mvp_executable(&decision) {
+            format!(
+                "the '{}' intent is not executable in the read-only MVP (tier: {:?})",
+                intent_name, decision.tier
+            )
+        } else {
+            format!(
+                "no command is available for '{}' on this OS ({:?})",
+                intent_name, os
+            )
+        };
+        return Ok(Prepared::Refused {
+            intent_name,
+            reason,
+            source,
+        });
+    }
+
+    // Render into a structured CommandPlan (never a shell string).
+    let plan = render(&intent, os).map_err(CoreError::Adapter)?;
+
+    // Plain-English preview: explanation + risk label + literal command.
+    let risk_label = risk_label(&decision.tier);
+    let cmd_display = display_command(&plan);
+    let preview = format!("{explanation}\nRisk: {risk_label}.\nCommand: {cmd_display}");
+
+    Ok(Prepared::Actionable(Actionable {
+        intent,
+        decision,
+        plan,
+        preview,
+        user_request: user_request.to_owned(),
+        source,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Prepared — result of Phase 1
 // ---------------------------------------------------------------------------
@@ -284,7 +327,13 @@ pub enum Prepared {
 
     /// The intent was recognised but cannot be executed in the current MVP
     /// (e.g. non-read-only tier, or no adapter available for this OS).
-    Refused { intent_name: String, reason: String },
+    Refused {
+        intent_name: String,
+        reason: String,
+        /// Where the refused intent came from (fast path vs model) — recorded in
+        /// the audit log for the refusal event.
+        source: IntentSource,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +364,8 @@ pub struct Actionable {
     preview: String,
     /// The original user request that produced this action.
     user_request: String,
+    /// Where the intent came from (fast path vs model), for the audit log.
+    source: IntentSource,
 }
 
 impl Actionable {
@@ -342,6 +393,12 @@ impl Actionable {
     /// The original user request that produced this action.
     pub fn user_request(&self) -> &str {
         &self.user_request
+    }
+
+    /// Where this action's intent came from — fast path (no model call) or the
+    /// model provider. Callers use this to record the correct `model_id`.
+    pub fn source(&self) -> IntentSource {
+        self.source
     }
 }
 
@@ -570,7 +627,7 @@ mod tests {
     use enshell_model::{ModelError, ModelProvider, ModelRequest};
     use enshell_os::{plan_requires_shell, Os};
     use enshell_policy::{ClassifyContext, ConfirmationKind};
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     // -----------------------------------------------------------------------
@@ -587,6 +644,25 @@ mod tests {
 
         fn infer(&self, _request: &ModelRequest) -> Result<String, ModelError> {
             Ok(self.0.clone())
+        }
+    }
+
+    /// A model provider that counts how many times `infer` is called (via a
+    /// shared counter the test keeps a handle to). Used to prove the fast path
+    /// does **not** call the model, and that a miss **does**.
+    struct CountingProvider {
+        calls: Arc<AtomicUsize>,
+        json: String,
+    }
+
+    impl ModelProvider for CountingProvider {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn infer(&self, _request: &ModelRequest) -> Result<String, ModelError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.json.clone())
         }
     }
 
@@ -775,6 +851,7 @@ mod tests {
             Prepared::Refused {
                 intent_name,
                 reason,
+                ..
             } => {
                 assert_eq!(intent_name, "install_package");
                 assert!(
@@ -807,6 +884,7 @@ mod tests {
             Prepared::Refused {
                 intent_name,
                 reason,
+                ..
             } => {
                 assert_eq!(intent_name, "explain_error");
                 // explain_error is ReadOnly (mvp_executable) but not renderable
@@ -814,6 +892,121 @@ mod tests {
             }
             other => panic!("expected Refused, got {:?}", variant_name(&other)),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // prepare() — deterministic fast path (§13)
+    // -----------------------------------------------------------------------
+
+    /// A known phrasing resolves WITHOUT calling the model, is tagged
+    /// `IntentSource::FastPath`, and yields the expected intent.
+    #[test]
+    fn fast_path_hit_skips_the_model() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        // The JSON would only be used if the model were (wrongly) called.
+        let json = make_json(
+            &Intent::AskClarification {
+                question: "unused".to_owned(),
+                options: None,
+            },
+            "unused",
+            0.3,
+        );
+        let provider = CountingProvider {
+            calls: calls.clone(),
+            json,
+        };
+        let orch = Orchestrator::new(provider, OrchestratorConfig::default());
+
+        let prepared = orch.prepare("what is using port 3000").expect("prepare ok");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "the fast path must NOT call the model"
+        );
+        match prepared {
+            Prepared::Actionable(a) => {
+                assert_eq!(a.source(), IntentSource::FastPath);
+                assert!(
+                    matches!(a.intent(), Intent::FindProcessUsingPort { port: 3000 }),
+                    "got {:?}",
+                    a.intent()
+                );
+            }
+            other => panic!("expected Actionable, got {:?}", variant_name(&other)),
+        }
+    }
+
+    /// A request the fast path does not recognise DOES call the model, and the
+    /// resulting action is tagged `IntentSource::Model`.
+    #[test]
+    fn fast_path_miss_calls_the_model_and_tags_model_source() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let json = make_json(
+            &Intent::FindProcessUsingPort { port: 3000 },
+            "I will check that port.",
+            0.9,
+        );
+        let provider = CountingProvider {
+            calls: calls.clone(),
+            json,
+        };
+        let orch = Orchestrator::new(provider, OrchestratorConfig::default());
+
+        // " port 3000" is present but the prefix is unknown and a qualifier
+        // trails the number, so the fast path declines and the model runs.
+        let prepared = orch
+            .prepare("tell me the process on port 3000 holding it")
+            .expect("prepare ok");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a fast-path miss must call the model exactly once"
+        );
+        match prepared {
+            Prepared::Actionable(a) => {
+                assert_eq!(a.source(), IntentSource::Model);
+                assert!(matches!(
+                    a.intent(),
+                    Intent::FindProcessUsingPort { port: 3000 }
+                ));
+            }
+            other => panic!("expected Actionable, got {:?}", variant_name(&other)),
+        }
+    }
+
+    /// Trust boundary: a fast-path-resolved intent is subject to the SAME policy
+    /// and confirmation gate as a model intent. `open_file_or_folder` is ReadOnly
+    /// but not yes-eligible, so even via the fast path `--yes` must NOT auto-run it.
+    #[cfg(unix)]
+    #[test]
+    fn fast_path_does_not_bypass_the_confirmation_gate() {
+        let orch = orchestrator_with_stub();
+        let prepared = orch.prepare("open /tmp").expect("prepare ok");
+
+        let actionable = match prepared {
+            Prepared::Actionable(a) => a,
+            other => panic!("expected Actionable, got {:?}", variant_name(&other)),
+        };
+
+        // Confirm it really came from the fast path and was still classified+rendered.
+        assert_eq!(actionable.source(), IntentSource::FastPath);
+        assert!(matches!(
+            actionable.intent(),
+            Intent::OpenFileOrFolder { .. }
+        ));
+        assert_eq!(actionable.decision().tier, RiskTier::ReadOnly);
+        assert!(!plan_requires_shell(actionable.plan()));
+
+        // --yes must NOT auto-run it (yes_eligible == false), exactly as for a
+        // model-produced open intent.
+        let result = orch.execute(&actionable, &yes_confirmation(), &ExecControl::default());
+        assert!(
+            matches!(result, Err(CoreError::ConfirmationRequired)),
+            "fast-path open with --yes must still require confirmation"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -844,6 +1037,7 @@ mod tests {
             plan,
             preview: "open /tmp".to_owned(),
             user_request: "open /tmp".to_owned(),
+            source: IntentSource::Model,
         };
 
         // Use a dummy orchestrator — only execute() is called.
@@ -892,6 +1086,7 @@ mod tests {
             plan,
             preview: "open /tmp".to_owned(),
             user_request: "open /tmp".to_owned(),
+            source: IntentSource::Model,
         };
 
         let orch = orchestrator_with_stub();
@@ -935,6 +1130,7 @@ mod tests {
             plan,
             preview: "check port 59876".to_owned(),
             user_request: "what is using port 59876".to_owned(),
+            source: IntentSource::Model,
         };
 
         let orch = orchestrator_with_stub();
@@ -967,6 +1163,7 @@ mod tests {
             plan,
             preview: "check port 3000".to_owned(),
             user_request: "what is using port 3000".to_owned(),
+            source: IntentSource::Model,
         };
 
         let orch = orchestrator_with_stub();
@@ -1000,6 +1197,7 @@ mod tests {
             plan,
             preview: "brew install vim".to_owned(),
             user_request: "install vim".to_owned(),
+            source: IntentSource::Model,
         };
 
         let orch = orchestrator_with_stub();
@@ -1119,6 +1317,7 @@ mod tests {
             plan,
             preview: "open /tmp".to_owned(),
             user_request: "open /tmp".to_owned(),
+            source: IntentSource::Model,
         };
 
         let orch = orchestrator_with_stub();
@@ -1183,6 +1382,7 @@ mod tests {
             plan,
             preview: "sleep 10".to_owned(),
             user_request: "sleep 10 seconds".to_owned(),
+            source: IntentSource::Model,
         };
 
         let control = ExecControl {

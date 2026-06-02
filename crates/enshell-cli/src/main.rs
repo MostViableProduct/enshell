@@ -45,6 +45,18 @@ const POLICY_VERSION: u32 = 1;
 /// it — so it is keyed to the template, not to which model ran.
 const PROMPT_TEMPLATE_VERSION: &str = "v1";
 
+/// Choose the `model_id` to record for an audited action.
+///
+/// A fast-path intent is produced by trusted Rust with **no model call**, so it
+/// is recorded as `"fast_path"`; everything else carries the provider's name
+/// (`"stub"` or the llama.cpp model). See [`enshell_core::IntentSource`].
+fn model_id_for(source: enshell_core::IntentSource, provider_name: &str) -> String {
+    match source {
+        enshell_core::IntentSource::FastPath => "fast_path".to_owned(),
+        enshell_core::IntentSource::Model => provider_name.to_owned(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CLI shape (clap derive)
 // ---------------------------------------------------------------------------
@@ -161,12 +173,8 @@ fn main() {
     let config = OrchestratorConfig { timeout };
     let provider = build_provider();
     let orch = enshell_core::Orchestrator::new(provider, config);
-    // The provider that actually produced the intent — recorded verbatim in
-    // every audit record below so the log reflects `stub` vs the real model,
-    // never a hardcoded assumption.
-    let model_id = orch.provider_name().to_owned();
 
-    // Phase 1: prepare (model → validate → policy → render).
+    // Phase 1: prepare (fast path or model → validate → policy → render).
     let prepared = match orch.prepare(&request) {
         Ok(p) => p,
         Err(e) => {
@@ -189,12 +197,19 @@ fn main() {
         Prepared::Refused {
             reason,
             intent_name,
+            source,
         } => {
+            // model_id reflects whether the fast path or the model produced this.
+            let model_id = model_id_for(source, orch.provider_name());
             // Audit the refusal before printing — security-relevant event.
             append_audit_record_raw(audit_record_for_refused(&request, &intent_name, &model_id));
             println!("I can't do that yet: {reason}");
         }
         Prepared::Actionable(actionable) => {
+            // model_id reflects whether the fast path (no model call) or the model
+            // produced this intent — recorded on every audit record written below.
+            let model_id = model_id_for(actionable.source(), orch.provider_name());
+
             // Always print the preview.
             println!("{}", actionable.preview());
             println!();
@@ -1640,6 +1655,22 @@ mod tests {
         assert!(!audit.correlation_id.is_empty());
         // timestamp is non-empty
         assert!(!audit.timestamp.is_empty());
+    }
+
+    /// `model_id_for` maps a fast-path intent to `"fast_path"` and a model intent
+    /// to the provider's name — this is what tags the audit `model_id` field.
+    #[test]
+    fn model_id_for_maps_source_to_audit_id() {
+        use enshell_core::IntentSource;
+        assert_eq!(
+            model_id_for(IntentSource::FastPath, "gemma-4 (llama.cpp)"),
+            "fast_path"
+        );
+        assert_eq!(model_id_for(IntentSource::Model, "stub"), "stub");
+        assert_eq!(
+            model_id_for(IntentSource::Model, "gemma-4 (llama.cpp)"),
+            "gemma-4 (llama.cpp)"
+        );
     }
 
     /// Regression guard: the audit record must record the *actual* provider that

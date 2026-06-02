@@ -51,6 +51,13 @@ classifies its risk, renders the correct OS-specific command (as a structured pl
 not a shell string), previews it in plain English, and executes only after you
 confirm.
 
+Common, unambiguous requests (e.g. "what is using port 3000") are resolved by a
+**deterministic fast path** *before* any model runs — instant, model-independent,
+and audited as `model_id = fast_path`. The fast path produces a trusted typed
+intent and still goes through the identical policy → render → confirm gate; it
+only declines (handing off to the model) when a request carries parameters it
+shouldn't guess at.
+
 📄 **Full plan:** [`docs/planning/enshell-ai-native-shell-plan.md`](docs/planning/enshell-ai-native-shell-plan.md)
 
 ## Planned highlights
