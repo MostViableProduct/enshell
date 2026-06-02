@@ -114,11 +114,16 @@ are never persisted.
 
 ## Privacy
 
-Context capture is **privacy-minimal by default**. Today the request handed to the
-model (`ModelRequest`) carries only your **request text**, the detected **OS**, and
-the **current working directory** path — nothing else. The additional environment
-facts the design calls for (shell type, last exit code, enShell's own history)
-require the shell-integration layer and are **planned, not yet captured**.
+Context capture is **privacy-minimal by default**. The request handed to the model
+(`ModelRequest`) carries only your **request text**, the detected **OS**, and the
+**current working directory** path — nothing else. The shell is detected from
+`$SHELL` for display only.
+
+The **last command's exit code** is captured **only if you opt in** by installing
+the shell hook (`enshell shell-init`); the hook exports just that exit code and the
+shell name, and the value is used only by `enshell doctor` and `enshell explain-last`
+— it is **not** added to `ModelRequest`. enShell's own command history is **not yet
+captured**.
 
 By design, the literal text of past commands, stdout/stderr, full shell history, and
 an environment summary will be **opt-in**; environment variable *values*, file

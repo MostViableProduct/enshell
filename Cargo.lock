@@ -297,6 +297,7 @@ dependencies = [
  "enshell-model",
  "enshell-os",
  "enshell-policy",
+ "enshell-shell",
  "enshell-telemetry",
  "serde_json",
 ]
@@ -358,6 +359,9 @@ dependencies = [
 [[package]]
 name = "enshell-shell"
 version = "0.0.0"
+dependencies = [
+ "enshell-os",
+]
 
 [[package]]
 name = "enshell-telemetry"

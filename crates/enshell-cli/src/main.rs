@@ -114,13 +114,19 @@ pub enum Commands {
     /// Show local command history from the audit log.
     History,
 
+    /// Print a shell hook snippet to enable last-exit capture (paste into your rc file).
+    ShellInit {
+        /// Which shell: bash or zsh (auto-detected from $SHELL if omitted).
+        shell: Option<String>,
+    },
+
+    /// Explain the last command's result (needs `enshell shell-init`).
+    ExplainLast,
+
     /// Not available yet — needs the undo plan, coming in a later phase.
     Undo,
 
-    /// Not available yet — needs shell context capture, coming in a later phase.
-    ExplainLast,
-
-    /// Not available yet — needs shell context capture, coming in a later phase.
+    /// Not available yet — needs the last command's text (opt-in capture), coming later.
     FixLast,
 }
 
@@ -149,7 +155,15 @@ fn main() {
                 run_history();
                 return;
             }
-            Commands::Undo | Commands::ExplainLast | Commands::FixLast => {
+            Commands::ShellInit { shell } => {
+                run_shell_init(shell.as_deref());
+                return;
+            }
+            Commands::ExplainLast => {
+                run_explain_last();
+                return;
+            }
+            Commands::Undo | Commands::FixLast => {
                 let stub_msg = stub_subcommand_message(cmd);
                 println!("{stub_msg}");
                 return;
@@ -666,17 +680,135 @@ pub fn format_tier(tier: RiskTier) -> &'static str {
 // ---------------------------------------------------------------------------
 
 fn stub_subcommand_message(cmd: &Commands) -> String {
-    let name = match cmd {
-        Commands::History => unreachable!("history is handled before this call"),
-        Commands::Undo => "undo",
-        Commands::ExplainLast => "explain-last",
-        Commands::FixLast => "fix-last",
-        Commands::Doctor => unreachable!("doctor is handled before this call"),
+    match cmd {
+        Commands::Undo => "'undo' is not available yet — it needs recorded per-action undo \
+             plans, which arrive alongside write actions in a later phase."
+            .to_owned(),
+        Commands::FixLast => "'fix-last' is not available yet — it needs the text of your last \
+             command, which enShell does not capture by default (richer, opt-in capture is \
+             planned)."
+            .to_owned(),
+        Commands::Doctor
+        | Commands::History
+        | Commands::ShellInit { .. }
+        | Commands::ExplainLast => {
+            unreachable!("{cmd:?} is handled before this call")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// shell-init subcommand
+// ---------------------------------------------------------------------------
+
+/// Print the shell hook snippet for the user to paste, or a helpful error.
+fn run_shell_init(shell_arg: Option<&str>) {
+    // An explicit arg is parsed via detect_shell_from (token only); otherwise we
+    // auto-detect from the environment.
+    let shell = match shell_arg {
+        Some(s) => enshell_shell::detect_shell_from(Some(s), None),
+        None => enshell_shell::detect_shell(),
     };
-    format!(
-        "'{name}' is not available yet — \
-         this needs the audit log / memory, coming in a later phase."
-    )
+    match shell_init_output(shell) {
+        Ok(text) => print!("{text}"),
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Pure core of [`run_shell_init`]: build the snippet output (or an error message)
+/// for a resolved shell. `Ok` is printed to stdout; `Err` to stderr with exit 1.
+fn shell_init_output(shell: Option<enshell_os::ShellKind>) -> Result<String, String> {
+    let Some(shell) = shell else {
+        return Err(
+            "Couldn't determine your shell. Pass one explicitly, e.g.:\n  \
+                    enshell shell-init bash\n  enshell shell-init zsh"
+                .to_owned(),
+        );
+    };
+    match enshell_shell::hook_snippet(&shell) {
+        Some(snippet) => {
+            let label = enshell_shell::shell_label(&shell);
+            let rc = match shell {
+                enshell_os::ShellKind::Bash => "~/.bashrc",
+                enshell_os::ShellKind::Zsh => "~/.zshrc",
+                _ => "your shell startup file",
+            };
+            Ok(format!(
+                "# enShell shell integration for {label}.\n\
+                 # Append the snippet below to {rc}, then start a new shell.\n\
+                 # It enables `enshell explain-last` by exporting ONLY the last exit code.\n\n\
+                 {snippet}"
+            ))
+        }
+        None => {
+            let label = enshell_shell::shell_label(&shell);
+            Err(format!(
+                "Shell integration for {label} is not available yet — supported shells: bash, zsh."
+            ))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// explain-last subcommand
+// ---------------------------------------------------------------------------
+
+/// Explain the last command's result using the privacy-minimal captured context.
+fn run_explain_last() {
+    println!("{}", explain_last_message(&enshell_shell::capture()));
+}
+
+/// Pure core of [`run_explain_last`]: build the explanation text from context.
+///
+/// With privacy-minimal capture we have only the exit code, so this maps well-known
+/// exit codes to standard meanings and is honest about not having the command text.
+fn explain_last_message(ctx: &enshell_shell::ShellContext) -> String {
+    if !ctx.hook_active {
+        let how = match ctx.shell {
+            Some(enshell_os::ShellKind::Bash) => "enshell shell-init bash",
+            Some(enshell_os::ShellKind::Zsh) => "enshell shell-init zsh",
+            _ => "enshell shell-init bash   (or: zsh)",
+        };
+        return format!(
+            "I can't see your last command's result — shell integration isn't enabled.\n\
+             Enable it (it captures only the exit code), then start a new shell:\n  {how}"
+        );
+    }
+    match ctx.last_exit_code {
+        Some(0) => "Your last command succeeded (exit code 0). Nothing to explain.".to_owned(),
+        Some(code) => {
+            let mut msg = format!("Your last command exited with code {code}.");
+            if let Some(hint) = exit_code_hint(code) {
+                msg.push_str(&format!("\nThat usually means: {hint}."));
+            }
+            msg.push_str(
+                "\n\nenShell's privacy-minimal default captures only the exit code — not the \
+                 command text or its output — so it can't analyse the failure in detail yet. \
+                 Richer, opt-in capture is planned.",
+            );
+            msg
+        }
+        None => "Shell integration is enabled, but the recorded exit code wasn't a number I \
+                 could read. Start a new shell after installing the hook and try again."
+            .to_owned(),
+    }
+}
+
+/// Map a well-known process exit code to its conventional meaning, if any.
+fn exit_code_hint(code: i32) -> Option<&'static str> {
+    match code {
+        1 => Some("a general error"),
+        2 => Some("misuse of arguments or a shell builtin"),
+        124 => Some("the command timed out"),
+        126 => Some("the command was found but is not executable (permission denied)"),
+        127 => Some("command not found — it may be misspelled or not on your PATH"),
+        130 => Some("terminated by Ctrl-C (SIGINT)"),
+        137 => Some("killed (SIGKILL — often out of memory)"),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -739,6 +871,30 @@ fn run_doctor(timeout: Option<Duration>) {
     println!("Selected provider: {provider_label}");
     println!("Adapters:        read-only adapters available for macOS and Linux");
     println!("Configured timeout: {timeout_str}");
+
+    // Shell integration status — privacy-minimal capture (cwd + last exit code).
+    println!("-----------------------------------");
+    let shell_ctx = enshell_shell::capture();
+    let shell_str = match &shell_ctx.shell {
+        Some(k) => enshell_shell::shell_label(k).to_owned(),
+        None => "unknown".to_owned(),
+    };
+    println!("Shell:           {shell_str}");
+    println!(
+        "Shell hook:      {}",
+        if shell_ctx.hook_active {
+            "installed (last exit code captured)"
+        } else {
+            "not installed (run `enshell shell-init` to enable explain-last)"
+        }
+    );
+    if shell_ctx.hook_active {
+        let last = match shell_ctx.last_exit_code {
+            Some(c) => c.to_string(),
+            None => "[present but unparsable]".to_owned(),
+        };
+        println!("Last exit code:  {last}");
+    }
 
     // Audit log status — resilient: never panics if log is missing or unreadable.
     println!("-----------------------------------");
@@ -1234,6 +1390,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_shell_init_subcommand_with_and_without_arg() {
+        let cli = Cli::try_parse_from(["enshell", "shell-init"]).expect("parse ok");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ShellInit { shell: None })
+        ));
+
+        let cli = Cli::try_parse_from(["enshell", "shell-init", "zsh"]).expect("parse ok");
+        match cli.command {
+            Some(Commands::ShellInit { shell: Some(s) }) => assert_eq!(s, "zsh"),
+            other => panic!("expected ShellInit{{zsh}}, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_bare_invocation_has_no_request_no_command() {
         let cli = Cli::try_parse_from(["enshell"]).expect("parse ok");
         assert!(cli.request.is_none());
@@ -1593,18 +1764,12 @@ mod tests {
     // stub subcommand messages
     // -----------------------------------------------------------------------
 
-    // Note: history is now a real command; stub_subcommand_message is no longer
-    // called for it. Tests for undo/explain-last/fix-last remain.
+    // Note: doctor/history/shell-init/explain-last are now real commands and are
+    // NOT routed through stub_subcommand_message. Only undo and fix-last remain stubs.
 
     #[test]
     fn stub_message_undo_mentions_not_available() {
         let msg = stub_subcommand_message(&Commands::Undo);
-        assert!(msg.contains("not available yet"));
-    }
-
-    #[test]
-    fn stub_message_explain_last_mentions_not_available() {
-        let msg = stub_subcommand_message(&Commands::ExplainLast);
         assert!(msg.contains("not available yet"));
     }
 
@@ -1671,6 +1836,81 @@ mod tests {
             model_id_for(IntentSource::Model, "gemma-4 (llama.cpp)"),
             "gemma-4 (llama.cpp)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // shell-init / explain-last pure logic
+    // -----------------------------------------------------------------------
+
+    fn shell_ctx(
+        shell: Option<enshell_os::ShellKind>,
+        last_exit_code: Option<i32>,
+        hook_active: bool,
+    ) -> enshell_shell::ShellContext {
+        enshell_shell::ShellContext {
+            shell,
+            cwd: None,
+            last_exit_code,
+            hook_active,
+        }
+    }
+
+    #[test]
+    fn shell_init_output_bash_includes_snippet_and_rc_path() {
+        let out = shell_init_output(Some(enshell_os::ShellKind::Bash)).expect("bash supported");
+        assert!(out.contains("~/.bashrc"));
+        assert!(out.contains("ENSHELL_LAST_EXIT_CODE"));
+    }
+
+    #[test]
+    fn shell_init_output_unknown_shell_errors_with_guidance() {
+        let err = shell_init_output(None).unwrap_err();
+        assert!(err.contains("shell-init"), "should guide the user: {err}");
+    }
+
+    #[test]
+    fn shell_init_output_unsupported_shell_errors() {
+        let err = shell_init_output(Some(enshell_os::ShellKind::Fish)).unwrap_err();
+        assert!(err.contains("not available yet"), "got: {err}");
+    }
+
+    #[test]
+    fn explain_last_without_hook_points_to_shell_init() {
+        let msg = explain_last_message(&shell_ctx(None, None, false));
+        assert!(msg.contains("shell-init"), "got: {msg}");
+    }
+
+    #[test]
+    fn explain_last_success_says_nothing_to_explain() {
+        let msg = explain_last_message(&shell_ctx(Some(enshell_os::ShellKind::Zsh), Some(0), true));
+        assert!(msg.contains("succeeded"), "got: {msg}");
+    }
+
+    #[test]
+    fn explain_last_failure_includes_known_code_hint_and_is_honest() {
+        let msg = explain_last_message(&shell_ctx(
+            Some(enshell_os::ShellKind::Bash),
+            Some(127),
+            true,
+        ));
+        assert!(msg.contains("127"));
+        assert!(msg.contains("command not found"));
+        // Honest about not having the command text under privacy-minimal capture.
+        assert!(msg.contains("privacy-minimal"));
+    }
+
+    #[test]
+    fn explain_last_hook_active_but_unparsed_code() {
+        let msg = explain_last_message(&shell_ctx(Some(enshell_os::ShellKind::Bash), None, true));
+        assert!(msg.contains("wasn't a number"), "got: {msg}");
+    }
+
+    #[test]
+    fn exit_code_hint_maps_common_codes_only() {
+        assert!(exit_code_hint(127).unwrap().contains("not found"));
+        assert!(exit_code_hint(126).unwrap().contains("not executable"));
+        assert!(exit_code_hint(0).is_none());
+        assert!(exit_code_hint(42).is_none());
     }
 
     /// Regression guard: the audit record must record the *actual* provider that
