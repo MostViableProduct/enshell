@@ -904,6 +904,25 @@ fn run_memory(action: &MemoryAction) {
         return;
     }
 
+    // `set` is the ONLY action that creates the database. Read-only/clear actions
+    // must NOT create it just to report emptiness — that would contradict the
+    // "created lazily on first set" contract. Report the empty state directly.
+    if !matches!(action, MemoryAction::Set { .. }) && !path.exists() {
+        match action {
+            MemoryAction::Show => {
+                println!("Memory database: {} (not created yet)", path.display());
+                println!("(no preferences set)");
+            }
+            MemoryAction::Get { .. } => println!("(not set)"),
+            MemoryAction::Export => println!("{}", prefs_to_json(&[])),
+            MemoryAction::Reset => println!("No preferences to clear (no memory database)."),
+            MemoryAction::Set { .. } | MemoryAction::Delete => {
+                unreachable!("set creates the db; delete handled above")
+            }
+        }
+        return;
+    }
+
     let store = match enshell_memory::Store::open(&path) {
         Ok(s) => s,
         Err(e) => {

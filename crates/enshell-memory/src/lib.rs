@@ -37,6 +37,10 @@ pub enum MemoryError {
     Migrate(rusqlite::Error),
     /// A query (read or write) failed.
     Query(rusqlite::Error),
+    /// The on-disk schema is newer than this build understands. We refuse to
+    /// touch it rather than risk corrupting a future format (or failing later
+    /// with a confusing "no such table"). `found` > `supported`.
+    FutureSchema { found: u32, supported: u32 },
 }
 
 impl std::fmt::Display for MemoryError {
@@ -45,6 +49,11 @@ impl std::fmt::Display for MemoryError {
             MemoryError::Open(e) => write!(f, "could not open memory store: {e}"),
             MemoryError::Migrate(e) => write!(f, "could not migrate memory store: {e}"),
             MemoryError::Query(e) => write!(f, "memory query failed: {e}"),
+            MemoryError::FutureSchema { found, supported } => write!(
+                f,
+                "memory database schema is v{found}, newer than this enShell supports \
+                 (v{supported}); upgrade enShell to use it"
+            ),
         }
     }
 }
@@ -53,6 +62,7 @@ impl std::error::Error for MemoryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             MemoryError::Open(e) | MemoryError::Migrate(e) | MemoryError::Query(e) => Some(e),
+            MemoryError::FutureSchema { .. } => None,
         }
     }
 }
@@ -93,6 +103,15 @@ impl Store {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(MemoryError::Migrate)?;
+
+        // Fail closed on a schema from a newer enShell rather than querying tables
+        // that may not exist (or, worse, mutating an unknown format).
+        if current > SCHEMA_VERSION {
+            return Err(MemoryError::FutureSchema {
+                found: current,
+                supported: SCHEMA_VERSION,
+            });
+        }
 
         if current < 1 {
             self.conn
@@ -303,5 +322,30 @@ mod tests {
         let path = std::env::temp_dir().join("enshell-mem-does-not-exist-xyz.db");
         let _ = std::fs::remove_file(&path);
         assert!(!delete_store_file(&path).expect("delete missing"));
+    }
+
+    #[test]
+    fn open_rejects_a_future_schema_version() {
+        let path = std::env::temp_dir().join("enshell-mem-future-schema.db");
+        let _ = std::fs::remove_file(&path);
+
+        // Create at the current schema, then forge a newer user_version.
+        Store::open(&path).expect("open v1");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("raw open");
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION + 998)
+                .expect("bump user_version");
+        }
+
+        match Store::open(&path) {
+            Err(MemoryError::FutureSchema { found, supported }) => {
+                assert_eq!(found, SCHEMA_VERSION + 998);
+                assert_eq!(supported, SCHEMA_VERSION);
+            }
+            Err(other) => panic!("expected FutureSchema, got {other:?}"),
+            Ok(_) => panic!("must reject a future schema"),
+        }
+
+        let _ = delete_store_file(&path);
     }
 }
