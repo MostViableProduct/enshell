@@ -80,8 +80,10 @@ shouldn't guess at.
   shell interpreter.
 - **Transparent & reversible** — plain-English previews, tamper-evident local audit
   log, and a three-tier recovery model (auto / assisted / irreversible).
-- **Privacy-minimal** — captures only OS/shell type, working directory, last exit
-  code, and enShell's own history by default; everything else is opt-in.
+- **Privacy-minimal** — by default a model request carries only your request text,
+  OS, and working directory; the last exit code is captured only via an opt-in shell
+  hook (`enshell shell-init`); secrets, file contents, env values, and clipboard are
+  never captured. (History/memory capture is separate and not yet implemented.)
 - **Cross-platform** — macOS, Linux, and Windows (PowerShell-first).
 
 ## Roadmap (summary)
