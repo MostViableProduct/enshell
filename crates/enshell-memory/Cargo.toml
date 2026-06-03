@@ -5,3 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+
+# Pinned below the 0.38 `libsqlite3-sys`, whose build script uses the unstable
+# `cfg_select!` macro and would raise our MSRV (workspace rust-version = 1.92).
+# Bundled SQLite keeps installs self-contained (no system libsqlite3-dev); a
+# system-SQLite feature for distro packaging can be revisited later.
+[dependencies]
+rusqlite = { version = "=0.37.0", features = ["bundled"] }

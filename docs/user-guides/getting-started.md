@@ -98,6 +98,7 @@ enshell doctor               Environment self-check (OS, provider, adapters, she
 enshell history              Show past actions from the local audit log.
 enshell shell-init [SHELL]   Print a shell hook snippet to paste into your rc file.
 enshell explain-last         Explain the last command's result (needs the hook).
+enshell memory <action>      Manage stored preferences (show/set/get/reset/export/delete).
 ```
 
 `--dry-run` is the safe way to see exactly what a request would run without
@@ -190,6 +191,30 @@ That usually means: command not found — it may be misspelled or not on your PA
 **not** see the command text or its error output (privacy-minimal default), so it
 can't analyse a failure in detail yet — richer, opt-in capture is planned.
 `enshell doctor` shows whether the hook is installed.
+
+## Preferences (memory)
+
+enShell keeps a small local preferences store in a SQLite database
+(`~/.enshell/memory.db`, override with `$ENSHELL_MEMORY_DB`). SQLite is **bundled**,
+so building/installing enShell needs no system `libsqlite3`.
+
+```bash
+enshell memory set default_timeout 90   # set a preference
+enshell memory get default_timeout      # → 90
+enshell memory show                     # list all prefs + the db path
+enshell memory export                   # dump prefs as JSON
+enshell memory reset                    # clear all prefs (keep the empty db)
+enshell memory delete                   # remove the database file entirely
+```
+
+The one preference enShell currently consumes is **`default_timeout`** (seconds):
+when set, it becomes the default execution timeout, overridable per-run with
+`--timeout` (and `0` means "no timeout"). The store is created lazily — only once
+you set a preference.
+
+The store is **local-only and never transmitted**, and is intended for **non-secret
+configuration**. It is separate from the audit log; `memory reset`/`delete` clear
+preferences and do not touch the audit log.
 
 ## Not yet available
 

@@ -16,6 +16,7 @@ ctrlc = "3.5.2"
 enshell-core = { version = "0.0.0", path = "../enshell-core" }
 enshell-intents = { version = "0.0.0", path = "../enshell-intents" }
 enshell-llama = { version = "0.0.0", path = "../enshell-llama", optional = true }
+enshell-memory = { version = "0.0.0", path = "../enshell-memory" }
 enshell-model = { version = "0.0.0", path = "../enshell-model" }
 enshell-os = { version = "0.0.0", path = "../enshell-os" }
 enshell-policy = { version = "0.0.0", path = "../enshell-policy" }

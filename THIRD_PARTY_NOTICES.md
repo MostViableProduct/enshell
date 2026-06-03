@@ -11,7 +11,7 @@ and their licenses.
 
 ## Current Status
 
-The workspace has third-party dependencies in three groups:
+The workspace has third-party dependencies in these groups:
 
 - **Serialization** (`enshell-intents`, `enshell-model`, `enshell-telemetry`,
   `enshell-cli`): `serde` (+`serde_derive`, `serde_core`), `serde_json`, and their
@@ -23,12 +23,21 @@ The workspace has third-party dependencies in three groups:
 - **Hashing** (`enshell-telemetry`, for the tamper-evident audit-log hash chain):
   `sha2` (RustCrypto) and its transitive crates (`digest`, `block-buffer`,
   `crypto-common`, `cpufeatures`, `typenum`, `const-oid`, `hybrid-array`, `libc`).
+- **Local storage** (`enshell-memory`, for SQLite-backed preferences): `rusqlite`
+  with **bundled SQLite** (`libsqlite3-sys` compiles the SQLite amalgamation via
+  `cc`, so no system `libsqlite3` is required), plus `hashlink`, `hashbrown`,
+  `foldhash`, `smallvec`, and `fallible-iterator`/`fallible-streaming-iterator`.
+  SQLite itself is **public domain**; the crates are permissively licensed.
+- **Optional `llama` feature** (`enshell-llama`, off by default): `llama-cpp-2` /
+  `llama-cpp-sys-2` and their build tree (`bindgen`, `cc`, `cmake`, …) — scanned by
+  `cargo deny --all-features` even though disabled by default.
 
-Together these are roughly **40 third-party crates**. Every one resolves to a
+Together these are several dozen third-party crates. Every one resolves to a
 permissive, Apache-2.0-compatible license drawn from the allowlist in
-[`deny.toml`](deny.toml): **Apache-2.0, MIT, Unicode-3.0, Unlicense** (a few crates
-additionally offer `Zlib` as an *alternative* in an `OR` expression; it is not the
-selected/required license, so it is not in the allowlist).
+[`deny.toml`](deny.toml): **Apache-2.0, MIT, Unicode-3.0, Unlicense, BSD-3-Clause,
+ISC, Apache-2.0 WITH LLVM-exception, and Zlib**. (`Zlib` is required by `foldhash`,
+a single-license crate in the SQLite tree; it is OSI-approved, FSF Free/Libre, and
+copyleft-free. Some other crates merely offer `Zlib` as an `OR` alternative.)
 
 This is **enforced by `cargo deny check`** on every push and pull request
 (`.github/workflows/ci.yml`): a dependency whose license is not satisfiable from the

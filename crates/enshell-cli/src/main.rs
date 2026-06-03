@@ -123,11 +123,34 @@ pub enum Commands {
     /// Explain the last command's result (needs `enshell shell-init`).
     ExplainLast,
 
+    /// Manage local memory (preferences stored in a local SQLite database).
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
+
     /// Not available yet — needs the undo plan, coming in a later phase.
     Undo,
 
     /// Not available yet — needs the last command's text (opt-in capture), coming later.
     FixLast,
+}
+
+/// Actions for the `memory` subcommand.
+#[derive(Debug, Subcommand)]
+pub enum MemoryAction {
+    /// Show all stored preferences and the database path.
+    Show,
+    /// Set a preference: `enshell memory set <key> <value>`.
+    Set { key: String, value: String },
+    /// Get a preference's value: `enshell memory get <key>`.
+    Get { key: String },
+    /// Remove all stored data, keeping the (empty) database.
+    Reset,
+    /// Export all stored preferences to stdout as JSON.
+    Export,
+    /// Delete the memory database file entirely.
+    Delete,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,12 +160,9 @@ pub enum Commands {
 fn main() {
     let cli = Cli::parse();
 
-    // Resolve the timeout for OrchestratorConfig / ExecControl.
-    let timeout: Option<Duration> = match cli.timeout {
-        Some(0) => None,
-        Some(secs) => Some(Duration::from_secs(secs)),
-        None => Some(Duration::from_secs(30)), // default
-    };
+    // Resolve the timeout: the --timeout flag wins, else the stored
+    // `default_timeout` preference, else 30s. A value of 0 means "no timeout".
+    let timeout: Option<Duration> = resolve_timeout(cli.timeout, memory_default_timeout_secs());
 
     // Dispatch subcommand first.
     if let Some(cmd) = &cli.command {
@@ -161,6 +181,10 @@ fn main() {
             }
             Commands::ExplainLast => {
                 run_explain_last();
+                return;
+            }
+            Commands::Memory { action } => {
+                run_memory(action);
                 return;
             }
             Commands::Undo | Commands::FixLast => {
@@ -691,7 +715,8 @@ fn stub_subcommand_message(cmd: &Commands) -> String {
         Commands::Doctor
         | Commands::History
         | Commands::ShellInit { .. }
-        | Commands::ExplainLast => {
+        | Commands::ExplainLast
+        | Commands::Memory { .. } => {
             unreachable!("{cmd:?} is handled before this call")
         }
     }
@@ -809,6 +834,132 @@ fn exit_code_hint(code: i32) -> Option<&'static str> {
         137 => Some("killed (SIGKILL — often out of memory)"),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// memory subcommand
+// ---------------------------------------------------------------------------
+
+/// Default path to the memory database: `$ENSHELL_MEMORY_DB`, else
+/// `$HOME/.enshell/memory.db`. Returns `None` if neither is available.
+pub fn default_memory_db_path() -> Option<PathBuf> {
+    if let Ok(override_path) = std::env::var("ENSHELL_MEMORY_DB") {
+        if !override_path.is_empty() {
+            return Some(PathBuf::from(override_path));
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    let mut path = PathBuf::from(home);
+    path.push(".enshell");
+    path.push("memory.db");
+    Some(path)
+}
+
+/// Resolve the execution timeout: the `--timeout` flag wins, else the stored
+/// `default_timeout` preference, else 30s. A value of `0` means "no timeout".
+fn resolve_timeout(cli_timeout: Option<u64>, pref_secs: Option<u64>) -> Option<Duration> {
+    let secs = cli_timeout.or(pref_secs).unwrap_or(30);
+    if secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(secs))
+    }
+}
+
+/// Read the `default_timeout` preference (in seconds), if a memory DB already
+/// exists and the value parses. Best-effort: it never *creates* the DB and never
+/// blocks the main flow on a memory error.
+fn memory_default_timeout_secs() -> Option<u64> {
+    let path = default_memory_db_path()?;
+    if !path.exists() {
+        return None; // don't create the DB just to read a (likely absent) pref
+    }
+    let store = enshell_memory::Store::open(&path).ok()?;
+    store
+        .get_pref("default_timeout")
+        .ok()
+        .flatten()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Run the `memory` subcommand.
+fn run_memory(action: &MemoryAction) {
+    let Some(path) = default_memory_db_path() else {
+        eprintln!("memory is unavailable: HOME is not set (and ENSHELL_MEMORY_DB is empty).");
+        std::process::exit(1);
+    };
+
+    // `delete` removes the file directly — it must work even if the DB won't open.
+    if let MemoryAction::Delete = action {
+        match enshell_memory::delete_store_file(&path) {
+            Ok(true) => println!("Deleted memory database: {}", path.display()),
+            Ok(false) => println!("No memory database to delete ({}).", path.display()),
+            Err(e) => {
+                eprintln!("Could not delete memory database: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    let store = match enshell_memory::Store::open(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Could not open memory database: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let result = match action {
+        MemoryAction::Show => run_memory_show(&store, &path),
+        MemoryAction::Set { key, value } => store.set_pref(key, value).map(|()| {
+            println!("Set {key} = {value}");
+        }),
+        MemoryAction::Get { key } => store.get_pref(key).map(|v| match v {
+            Some(val) => println!("{val}"),
+            None => println!("(not set)"),
+        }),
+        MemoryAction::Reset => store
+            .reset()
+            .map(|()| println!("Cleared all stored preferences.")),
+        MemoryAction::Export => store.all_prefs().map(|prefs| {
+            println!("{}", prefs_to_json(&prefs));
+        }),
+        MemoryAction::Delete => unreachable!("delete is handled above"),
+    };
+    if let Err(e) = result {
+        eprintln!("memory error: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn run_memory_show(
+    store: &enshell_memory::Store,
+    path: &Path,
+) -> Result<(), enshell_memory::MemoryError> {
+    println!("Memory database: {}", path.display());
+    let prefs = store.all_prefs()?;
+    if prefs.is_empty() {
+        println!("(no preferences set)");
+    } else {
+        for (k, v) in prefs {
+            println!("  {k} = {v}");
+        }
+    }
+    Ok(())
+}
+
+/// Serialize prefs as a pretty JSON object. Keys are sorted (serde_json's default
+/// `Map` is a `BTreeMap`), so the output is stable.
+fn prefs_to_json(prefs: &[(String, String)]) -> String {
+    let map: serde_json::Map<String, serde_json::Value> = prefs
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+        .collect();
+    serde_json::to_string_pretty(&serde_json::Value::Object(map))
+        .unwrap_or_else(|_| "{}".to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -1911,6 +2062,63 @@ mod tests {
         assert!(exit_code_hint(126).unwrap().contains("not executable"));
         assert!(exit_code_hint(0).is_none());
         assert!(exit_code_hint(42).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // memory: timeout resolution + export rendering
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_timeout_flag_beats_pref() {
+        assert_eq!(
+            resolve_timeout(Some(5), Some(99)),
+            Some(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn resolve_timeout_uses_pref_when_no_flag() {
+        assert_eq!(
+            resolve_timeout(None, Some(60)),
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn resolve_timeout_defaults_to_30s() {
+        assert_eq!(resolve_timeout(None, None), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn resolve_timeout_zero_means_no_timeout() {
+        assert_eq!(resolve_timeout(Some(0), None), None);
+        assert_eq!(resolve_timeout(None, Some(0)), None);
+    }
+
+    #[test]
+    fn prefs_to_json_is_valid_sorted_object() {
+        let json = prefs_to_json(&[
+            ("editor".to_owned(), "nvim".to_owned()),
+            ("default_timeout".to_owned(), "60".to_owned()),
+        ]);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["editor"], "nvim");
+        assert_eq!(v["default_timeout"], "60");
+    }
+
+    #[test]
+    fn parse_memory_set_subcommand() {
+        let cli = Cli::try_parse_from(["enshell", "memory", "set", "default_timeout", "60"])
+            .expect("parse ok");
+        match cli.command {
+            Some(Commands::Memory {
+                action: MemoryAction::Set { key, value },
+            }) => {
+                assert_eq!(key, "default_timeout");
+                assert_eq!(value, "60");
+            }
+            other => panic!("expected memory set, got {other:?}"),
+        }
     }
 
     /// Regression guard: the audit record must record the *actual* provider that

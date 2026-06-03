@@ -125,6 +125,11 @@ shell name, and the value is used only by `enshell doctor` and `enshell explain-
 — it is **not** added to `ModelRequest`. enShell's own command history is **not yet
 captured**.
 
+Preferences set with `enshell memory` are stored in a **local** SQLite database
+(`~/.enshell/memory.db`), are **never transmitted**, and are intended for non-secret
+configuration; `enshell memory reset`/`delete` clear them. The store is separate from
+the audit log.
+
 By design, the literal text of past commands, stdout/stderr, full shell history, and
 an environment summary will be **opt-in**; environment variable *values*, file
 contents, secrets, tokens, SSH keys, and clipboard contents are **never** captured.

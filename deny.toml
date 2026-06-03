@@ -104,6 +104,12 @@ allow = [
     "BSD-3-Clause",                  # bindgen, encoding_rs
     "ISC",                           # libloading
     "Apache-2.0 WITH LLVM-exception", # wit-bindgen, wasip2 (wasm-target-gated)
+    # Added for the bundled-SQLite tree (rusqlite -> hashlink -> hashbrown ->
+    # foldhash). `foldhash` is licensed SOLELY under Zlib (not an OR alternative),
+    # so it must be allowed. Zlib is OSI-approved, FSF Free/Libre, permissive (no
+    # copyleft, no advertising clause), and Apache-2.0-compatible. Vetted: this is
+    # the only crate that *requires* Zlib; others only offer it as an OR option.
+    "Zlib",                          # foldhash (required, single-license)
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the
