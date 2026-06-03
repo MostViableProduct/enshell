@@ -558,8 +558,8 @@ pub fn guided_install_message() -> String {
      \n\
      To enable the real assistant, install a model:\n\
      \n\
-     \x20 Model:   Gemma 4 E4B Instruct (Q4 GGUF, e.g. Q4_K_M)\n\
-     \x20 Size:    a few GB to download (plan for ~16 GB RAM to run comfortably)\n\
+     \x20 Model:   Gemma 4 E2B Instruct (Q4 GGUF, e.g. Q4_K_M)\n\
+     \x20 Size:    ~1-2 GB to download (runs comfortably in ~8 GB RAM)\n\
      \x20 Source:  Google's official Gemma resources — https://ai.google.dev/gemma\n\
      \x20          (find the exact per-version GGUF on the official model card; \
      enShell does not host or mirror the weights)\n\
@@ -570,7 +570,7 @@ pub fn guided_install_message() -> String {
      \n\
      Then place the .gguf file in ~/.enshell/models/ (enShell picks it up\n\
      automatically), or set ENSHELL_MODEL to its full path:\n\
-     \x20 export ENSHELL_MODEL=/path/to/gemma-4-e4b-instruct.Q4_K_M.gguf\n"
+     \x20 export ENSHELL_MODEL=/path/to/gemma-4-e2b-instruct.Q4_K_M.gguf\n"
         .to_owned()
 }
 

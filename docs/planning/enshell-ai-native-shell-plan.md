@@ -395,8 +395,8 @@ See §6 for the intent schema and §13 for crate choices. Key requirements:
 
 | Profile | Model | Use | Min machine |
 |---|---|---|---|
-| **Default** | Gemma 4 **E4B Instruct, Q4** (GGUF) | Full intent set for the supported tiers | Modern laptop, **16 GB RAM** |
-| **Experimental fallback** | Gemma 4 **E2B Instruct, Q4** | Low-resource devices; **limited to read-only workflows + command explanation** | < 16 GB RAM |
+| **Phase-0 default** | Gemma 4 **E2B Instruct, Q4** (GGUF) | The read-only MVP intent set + command explanation — scope matches the read-only MVP (§11, §18), at the smallest footprint | Modern laptop, **8 GB RAM** |
+| **Upgrade (fuller intent set)** | Gemma 4 **E4B Instruct, Q4** | Full intent set across all tiers — the planned step up when write/system actions land (Phase 3+) | Modern laptop, **16 GB RAM** |
 | **Advanced / pro** | Gemma 4 **26B A4B, Q4** | Stronger local reasoning, multi-step diagnostics, future autonomous agents | Workstation / GPU |
 
 - **Hardware profiles** (laptop CPU, Apple Silicon/Metal, consumer GPU, workstation)
@@ -936,7 +936,7 @@ config** (Gemma 4 size + quant + context + reference hardware; Open Question #1)
 the perf targets become enforceable · licensing review (counsel engaged).
 
 ### Phase 1 — MVP CLI
-Rust CLI · natural-language input · llama.cpp local inference · Gemma 4 E4B Instruct
+Rust CLI · natural-language input · llama.cpp local inference · Gemma 4 E2B Instruct
 Q4 (guided install) · structured intent output · preview & confirmation · basic
 Linux + macOS commands · local execution logs.
 **MVP execution is read-only ONLY** (project-owner decision): write/system actions
@@ -1046,17 +1046,17 @@ Suggested Rust crates (candidates; finalized in Phase 0/1).
 
 Performance numbers are only meaningful against a **named reference configuration**.
 The model is **decided** (project-owner decision, §19.1); the targets become MVP
-acceptance criteria once Phase 0 confirms E4B Q4 clears the intent-accuracy eval bar
-on the 16 GB reference machine (§19.2 item B).
+acceptance criteria once Phase 0 confirms E2B Q4 clears the intent-accuracy eval bar
+on the 8 GB reference machine (§19.2 item B).
 
 **Reference configuration:**
 
 | Field | Value |
 |---|---|
-| Model | **Gemma 4 E4B Instruct** (default profile). Fallback: E2B Instruct (read-only + explanation only); pro: 26B A4B. |
-| Quantization | **Q4** GGUF default (`Q4_K_M` on CPU/Apple Silicon); higher precision (`Q5_K_M`/`Q8_0`) allowed on GPU profiles with headroom |
+| Model | **Gemma 4 E2B Instruct** (Phase-0 default). Upgrade: E4B Instruct (fuller intent set, Phase 3+); pro: 26B A4B. |
+| Quantization | **Q4** GGUF default (`Q4_K_M` on CPU/Apple Silicon); higher precision (`Q5_K_M`/`Q8_0`) allowed where there is headroom |
 | Context length | 4096 tokens (system prompt + tool schema + scrubbed context fit within this) |
-| Reference hardware | **Laptop CPU:** x86-64, 8 cores, **16 GB RAM**, no GPU · **Apple Silicon:** M-class, 16 GB unified · **Consumer GPU:** 8 GB VRAM (CUDA/Vulkan offload) |
+| Reference hardware | **Laptop CPU:** x86-64, 8 cores, **8 GB RAM**, no GPU · **Apple Silicon:** M-class, 8 GB unified · **Consumer GPU:** 8 GB VRAM (CUDA/Vulkan offload) |
 
 **Targets against that reference config** (refined per hardware profile, §4 Layer 3;
 asserted in CI on the reference machines):
@@ -1066,7 +1066,7 @@ asserted in CI on the reference machines):
 | Cold start (launch → ready, model not yet loaded) | ≤ 300 ms | ≤ 250 ms | ≤ 300 ms |
 | Model load (first, lazy inference) | ≤ 8 s | ≤ 4 s | ≤ 5 s |
 | Warm inference latency (intent JSON, typical request) | ≤ 3 s | ≤ 1.5 s | ≤ 1 s |
-| Resident memory ceiling (incl. model at the pinned quant) | ≤ 6 GB | ≤ 8 GB | ≤ 8 GB host + ≤ 8 GB VRAM |
+| Resident memory ceiling (incl. model at the pinned quant) | ≤ 3 GB | ≤ 3 GB | ≤ 3 GB host + ≤ 4 GB VRAM |
 
 > Deterministic fast-path requests (below) bypass the model entirely and are bound
 > only by cold start, not by inference latency.
@@ -1366,7 +1366,7 @@ inputs to the plan (and reflected in the relevant sections above).
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Default Gemma 4 model size? | **Gemma 4 E4B Instruct, Q4** via llama.cpp; min machine **16 GB RAM**. Fallback **E2B Instruct Q4** (low-resource; read-only + explanation only). Pro **26B A4B Q4** (stronger reasoning, future agents). (§4 Layer 3, §13) |
+| 1 | Default Gemma 4 model size? | **Gemma 4 E2B Instruct, Q4** via llama.cpp for **Phase 0** (smallest footprint; its read-only + explanation scope matches the read-only MVP); min machine **8 GB RAM**. Upgrade **E4B Instruct Q4** (fuller intent set, Phase 3+; 16 GB). Pro **26B A4B Q4** (stronger reasoning, future agents). (§4 Layer 3, §13) |
 | 2 | Auto-download or ask to install models? | **Guided install, not silent auto-download.** Detect missing weights; show size/source/license/disk and require explicit consent. Auto-download later as opt-in advanced setting. (§4 Layer 3, §10) |
 | 3 | Windows PowerShell-first or WSL-first? | **PowerShell-first**; WSL detected/supported where useful but **not required**; Windows Terminal + native PowerShell are the default. (§4 Layer 5) |
 | 4 | Contribution governance: DCO or CLA? | **DCO** for early governance; **no CLA at launch**; revisit a CLA only for future dual-licensing / commercial relicensing / foundation / patent needs. (§10) |
@@ -1385,7 +1385,7 @@ inputs to the plan (and reflected in the relevant sections above).
 | # | Question | Why it matters | Leaning |
 |---|---|---|---|
 | A | llama.cpp via Rust FFI bindings or subprocess server? | Build complexity, portability, packaging. | Evaluate in Phase 0; lean bindings for a single binary, subprocess as fallback. |
-| B | Confirm **E4B Q4** clears the intent-accuracy eval bar on the 16 GB reference machine (else adjust size/quant). | The §13 perf targets and default profile depend on it. | Validate against the §14 eval set in Phase 0/1. |
+| B | Confirm **E2B Q4** clears the intent-accuracy eval bar on the 8 GB reference machine (else step up to E4B or adjust quant). | The §13 perf targets and default profile depend on it. | Validate against the §14 eval set in Phase 0/1; E4B is the ready upgrade if E2B falls short. |
 | C | Default **confidence threshold** value (placeholder 0.55). | Too low → risky guesses; too high → over-asking. | Tune empirically against the eval set. |
 | D | Exact per-action **undo mechanics** for Phase 3 write/system actions per OS. | Reversibility promise for non-read-only tiers. | Design alongside Phase 3 with the recovery-tier model. |
 
@@ -1398,7 +1398,7 @@ inputs to the plan (and reflected in the relevant sections above).
 > **enShell — Natural language for your terminal.** enShell is an open-source
 > (Apache-2.0), Rust, cross-platform AI-native shell layer for macOS, Linux, and
 > Windows. Non-technical users type what they want ("show me what's using port
-> 3000"); enShell runs a local **Gemma 4 E4B Instruct (Q4)** model via llama.cpp —
+> 3000"); enShell runs a local **Gemma 4 E2B Instruct (Q4)** model via llama.cpp —
 > guided-install, no silent download — to produce a **typed intent** (never a raw
 > shell command), then trusted Rust code validates it, classifies its risk, renders
 > the correct OS-specific command as a structured `CommandPlan` (no shell
@@ -1434,9 +1434,9 @@ This document (§1–§19).
 
 **Epic C — Model runtime (`enshell-model`, `enshell-llama`)**
 - C1: `ModelProvider` trait + stub provider (deterministic, for tests).
-- C2: llama.cpp + **Gemma 4 E4B Instruct Q4** integration (binding-vs-subprocess
-  decision) + guided-install flow (size/source/license/disk/consent); validate E4B Q4
-  against the eval bar on the 16 GB reference machine (§19.2 B).
+- C2: llama.cpp + **Gemma 4 E2B Instruct Q4** integration (binding-vs-subprocess
+  decision) + guided-install flow (size/source/license/disk/consent); validate E2B Q4
+  against the eval bar on the 8 GB reference machine (§19.2 B); E4B is the ready upgrade.
 - C3: Prompt template + tool schema + golden-prompt snapshot tests.
 - C4: Schema-constrained decode, retry, low-confidence fallback.
 - C5: Deterministic fast-path matcher (known phrasings skip the model) + perf-target
@@ -1485,14 +1485,15 @@ This document (§1–§19).
 ### 20.7 Clarifying questions for the project owner
 
 **All eight launch-shaping questions have been answered** by the project owner and
-are recorded in §19.1 (and folded into the body): default model (Gemma 4 E4B Q4,
-16 GB min), guided install, PowerShell-first Windows, DCO governance,
+are recorded in §19.1 (and folded into the body): default model (Gemma 4 E2B Q4 for
+Phase 0, 8 GB min), guided install, PowerShell-first Windows, DCO governance,
 privacy-minimal capture, read-only-only MVP, defer enterprise/fleet to Phase 6 with
 hooks now, and pre-launch counsel review.
 
 **Remaining items to confirm during Phase 0/1** (from §19.2): the llama.cpp
-integration mechanism (FFI vs subprocess); empirical confirmation that **E4B Q4**
-clears the intent-accuracy eval bar on the 16 GB reference machine; the default
+integration mechanism (FFI vs subprocess); empirical confirmation that **E2B Q4**
+clears the intent-accuracy eval bar on the 8 GB reference machine (E4B the ready
+upgrade); the default
 confidence threshold; and the per-OS undo mechanics for Phase-3 write actions.
 
 ---

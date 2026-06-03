@@ -144,7 +144,7 @@ By default enShell uses the stub. To use the real local model via llama.cpp:
 
 ```bash
 # Requires cmake + a C++ toolchain (llama.cpp is compiled from source).
-export ENSHELL_MODEL=/path/to/gemma-4-e4b-instruct.Q4_K_M.gguf
+export ENSHELL_MODEL=/path/to/gemma-4-e2b-instruct.Q4_K_M.gguf
 cargo run -p enshell-cli --features llama -- "what is using port 3000"
 ```
 

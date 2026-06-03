@@ -71,7 +71,7 @@ shouldn't guess at.
 
 ## Planned highlights
 
-- **Local-first by default** — Gemma 4 E4B (Q4) via llama.cpp; guided install, no
+- **Local-first by default** — Gemma 4 E2B (Q4) via llama.cpp; guided install, no
   silent download; telemetry off; no cloud dependency.
 - **Five-layer architecture** — natural-language wrapper → safety/policy broker →
   local model runtime → shell integration → OS-level adapters.

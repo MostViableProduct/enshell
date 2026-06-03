@@ -121,7 +121,7 @@ pub struct AuditRecord {
     pub policy_version: u32,
     /// Version of the intent catalog used.
     pub intent_schema_version: u32,
-    /// Which model produced the intent (e.g. `"gemma-4-e4b-q4"`, `"stub"`).
+    /// Which model produced the intent (e.g. `"gemma-4-e2b-q4"`, `"stub"`).
     pub model_id: String,
     /// Quantization label (e.g. `"Q4"`), or `None` for a stub/no-model path.
     pub model_quant: Option<String>,
@@ -642,7 +642,7 @@ mod tests {
             timestamp: "2024-06-01T12:00:00Z".to_string(),
             policy_version: 3,
             intent_schema_version: 2,
-            model_id: "gemma-4-e4b-q4".to_string(),
+            model_id: "gemma-4-e2b-q4".to_string(),
             model_quant: Some("Q4".to_string()),
             prompt_template_version: "v2".to_string(),
             intent: "find_large_files".to_string(),
