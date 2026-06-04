@@ -70,8 +70,8 @@ attribution above.
 
 | Profile | Model | Quantization | Use case | Min machine |
 |---|---|---|---|---|
-| **Default** | Gemma 4 E4B Instruct | Q4 (GGUF, e.g. `Q4_K_M`) | Full intent set for supported tiers | Modern laptop, 16 GB RAM |
-| **Fallback (low-resource)** | Gemma 4 E2B Instruct | Q4 (GGUF) | Read-only workflows and command explanation only | < 16 GB RAM |
+| **Phase-0 default** | Gemma 4 E2B Instruct | Q4 (GGUF, e.g. `Q4_K_M`) | Read-only MVP intent set + command explanation (matches the read-only MVP scope), smallest footprint | Modern laptop, 8 GB RAM |
+| **Upgrade (fuller intent set)** | Gemma 4 E4B Instruct | Q4 (GGUF) | Full intent set across all tiers — the planned step up when write/system actions land (Phase 3+) | Modern laptop, 16 GB RAM |
 | **Advanced / pro** | Gemma 4 26B A4B | Q4 (GGUF) | Stronger reasoning, multi-step diagnostics, future autonomous agents | Workstation / GPU |
 
 All three profiles are installed via the same **guided install flow**: enShell
