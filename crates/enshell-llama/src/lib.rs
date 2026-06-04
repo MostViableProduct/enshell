@@ -299,9 +299,10 @@ mod provider {
             // the intent catalog) masks tokens that would break the ProposedAction
             // JSON shape or use an unknown intent name, then greedy picks the
             // highest-probability *valid* token — deterministic argmax among the
-            // grammar-legal tokens. This eliminates malformed-JSON / invented-intent
-            // failures at generation time; per-intent params are still validated by
-            // `parse_model_output` afterward.
+            // grammar-legal tokens. This sharply reduces malformed-JSON output and
+            // rules out invented intent names; it is not a full validator (e.g. it
+            // doesn't encode per-intent params), so `parse_model_output` still
+            // validates the result afterward.
             let grammar = enshell_model::intent_grammar();
             let grammar_sampler = LlamaSampler::grammar(self.model.as_ref(), &grammar, "root")
                 .map_err(|e| {

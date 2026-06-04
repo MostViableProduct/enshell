@@ -1,14 +1,18 @@
 //! GBNF grammar derived from the intent catalog (Track A.3).
 //!
 //! [`intent_grammar`] returns a [GBNF] grammar that constrains a model's decoding
-//! to a syntactically-valid `ProposedAction` JSON object whose `intent` is one of
-//! the known intent names. This kills the two failure modes small models actually
-//! hit — **malformed JSON** and **invented intent names** — at generation time.
+//! to a `ProposedAction` JSON object whose `intent` is one of the known intent
+//! names. It sharply reduces the two failure modes small models actually hit —
+//! **malformed JSON** and **invented intent names** — at generation time: the
+//! string rule excludes raw control characters, numbers are well-formed, and the
+//! object structure is balanced, while the `intent` field is restricted to the
+//! catalog.
 //!
-//! Per-intent **parameter** shapes are intentionally *not* constrained here: the
-//! `parameters` object is left general and validated after generation by
-//! [`enshell_intents::parse_model_output`] (the strict schema parse + domain
-//! checks). Constraining params per-intent is a clean future refinement.
+//! It is **not** a substitute for validation. The grammar does not encode every
+//! JSON nuance (e.g. lone unicode surrogate escapes), nor per-intent parameter
+//! shapes — the `parameters` object is left general. [`enshell_intents::parse_model_output`]
+//! (the strict schema parse + domain checks) remains the authoritative validator
+//! after generation; constraining params per-intent is a clean future refinement.
 //!
 //! The intent-name alternatives are derived from [`crate::intent_tool_schema`], so
 //! the grammar and the schema the model is shown share a single source of truth
@@ -61,7 +65,7 @@ member ::= string ws ":" ws value
 array ::= "[" ws ( value ( "," ws value )* )? "]" ws
 value ::= object | array | string | number | boolean | "null"
 string ::= "\"" char* "\"" ws
-char ::= [^"\\] | "\\" ( ["\\/bfnrt] | "u" hex hex hex hex )
+char ::= [^"\\\x7F\x00-\x1F] | "\\" ( ["\\/bfnrt] | "u" hex hex hex hex )
 hex ::= [0-9a-fA-F]
 number ::= "-"? ( "0" | [1-9] [0-9]* ) ( "." [0-9]+ )? ( ( "e" | "E" ) ( "-" | "+" )? [0-9]+ )? ws
 boolean ::= "true" | "false"
@@ -130,6 +134,27 @@ mod tests {
         assert!(
             risk_rule.contains("(") && risk_rule.trim_end().ends_with(")?"),
             "risk_field must be optional: {risk_rule}"
+        );
+    }
+
+    #[test]
+    fn grammar_string_rule_excludes_control_chars() {
+        let g = intent_grammar();
+        let char_rule = g
+            .lines()
+            .find(|l| l.trim_start().starts_with("char ::="))
+            .expect("char rule present");
+        // Unescaped string chars MUST exclude JSON control characters
+        // (U+0000..=U+001F); otherwise constrained decoding could still emit a
+        // string that serde_json rejects.
+        assert!(
+            char_rule.contains(r"\x00-\x1F"),
+            "char rule must exclude control characters: {char_rule}"
+        );
+        // The lax `[^"\\]` class (control chars allowed) must not be used.
+        assert!(
+            !char_rule.contains(r#"[^"\\]"#),
+            "char rule must not use the control-char-permitting [^\"\\\\] class: {char_rule}"
         );
     }
 
