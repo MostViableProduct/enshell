@@ -27,8 +27,13 @@
 //!   `du` enumerates all files and the caller chooses with `head`.  Document
 //!   this as a known limitation; a future slice can add `find … -size +<n>`
 //!   pre-filtering.
-//! - `source` and `filter` parameters on [`InspectLogs`] are **deferred**;
-//!   a future slice will add `--predicate` / grep post-filtering.
+//! - `source` and `filter` parameters on [`InspectLogs`] are **not yet
+//!   implemented on any OS**, and `since` is not yet implemented on Windows.
+//!   These are **rejected with [`AdapterError::InvalidParameter`] when present**
+//!   (a future slice will add `--predicate` / grep post-filtering and a Windows
+//!   XPath time query) — the adapter refuses rather than silently render a query
+//!   broader than the request. The unqualified "recent logs" request renders on
+//!   all three OSes; `since` additionally renders on macOS/Linux.
 //! - Write/system intents (`InstallPackage`, `KillProcess`, `CompressFolder`,
 //!   `CreateBackup`, `CreateProject`, `GitCommitChanges`, `StartService`,
 //!   `StopService`, `UpdatePackages`) → [`AdapterError::NotYetImplemented`].
@@ -247,10 +252,11 @@ pub fn render(intent: &Intent, os: Os) -> Result<CommandPlan, AdapterError> {
 
         Intent::OpenFileOrFolder { path } => render_open_file_or_folder(path, os),
 
-        Intent::InspectLogs { since, .. } => {
-            // source and filter are deferred; see module doc.
-            render_inspect_logs(since.as_deref(), os)
-        }
+        Intent::InspectLogs {
+            source,
+            since,
+            filter,
+        } => render_inspect_logs(source.as_deref(), since.as_deref(), filter.as_deref(), os),
 
         Intent::CheckSystemHealth {} => render_check_system_health(os),
 
@@ -506,7 +512,33 @@ fn render_open_file_or_folder(path: &str, os: Os) -> Result<CommandPlan, Adapter
     }
 }
 
-fn render_inspect_logs(since: Option<&str>, os: Os) -> Result<CommandPlan, AdapterError> {
+fn render_inspect_logs(
+    source: Option<&str>,
+    since: Option<&str>,
+    filter: Option<&str>,
+    os: Os,
+) -> Result<CommandPlan, AdapterError> {
+    // Fidelity invariant: the rendered command must honor every parameter the
+    // intent specifies, or the adapter must refuse — it must NEVER silently
+    // render a *broader* query than asked (enShell never quietly does less than
+    // requested). `source` and `filter` are not yet encodable on any OS, so a
+    // request that carries them is rejected loudly rather than run unfiltered.
+    if source.is_some() {
+        return Err(AdapterError::InvalidParameter {
+            intent: "inspect_logs",
+            reason: "selecting a specific log `source` is not supported yet; omit it to \
+                     query the default system log (otherwise enShell would silently read a \
+                     different/broader log than requested)",
+        });
+    }
+    if filter.is_some() {
+        return Err(AdapterError::InvalidParameter {
+            intent: "inspect_logs",
+            reason: "text/pattern `filter`ing of logs is not supported yet; omit it to show \
+                     recent unfiltered logs (otherwise enShell would silently show more than \
+                     requested)",
+        });
+    }
     match os {
         Os::MacOs => {
             // log show --style syslog --last <since|"1h">
@@ -530,10 +562,21 @@ fn render_inspect_logs(since: Option<&str>, os: Os) -> Result<CommandPlan, Adapt
             }))
         }
         Os::Windows => {
+            // `since` (time filtering) is not yet encodable on Windows — it would
+            // need a verbose XPath time query. Refuse when it is present rather
+            // than run `wevtutil` unfiltered, which would return a broader window
+            // than asked. The unqualified request still renders below.
+            if since.is_some() {
+                return Err(AdapterError::InvalidParameter {
+                    intent: "inspect_logs",
+                    reason: "time filtering (`since`) is not supported yet on Windows; omit it \
+                             to show the 200 most recent System-log events (otherwise enShell \
+                             would silently show a broader time window than requested)",
+                });
+            }
             // wevtutil qe System /c:200 /rd:true /f:text
             // `qe` (query-events) is read-only; /rd:true = newest first; /c:200 =
-            // cap at 200 events; /f:text = plain text. The `since` filter is
-            // deferred on Windows (it would need a verbose XPath query string).
+            // cap at 200 events; /f:text = plain text.
             Ok(CommandPlan::exec(
                 "wevtutil",
                 ["qe", "System", "/c:200", "/rd:true", "/f:text"],
@@ -1093,6 +1136,89 @@ mod tests {
             filter: None,
         };
         assert!(!plan_requires_shell(&render(&intent, Os::Linux).unwrap()));
+    }
+
+    #[test]
+    fn inspect_logs_windows_unqualified_renders_wevtutil() {
+        let intent = Intent::InspectLogs {
+            source: None,
+            since: None,
+            filter: None,
+        };
+        let plan = render(&intent, Os::Windows).expect("unqualified logs render on Windows");
+        let step = as_exec(&plan);
+        assert_eq!(step.program, "wevtutil");
+        assert_eq!(
+            step.args,
+            vec!["qe", "System", "/c:200", "/rd:true", "/f:text"]
+        );
+    }
+
+    /// The core fidelity fix: a time-qualified log request must NOT silently run
+    /// an unfiltered (broader) Windows query — it is refused until the XPath time
+    /// query is implemented. macOS/Linux still honor `since` (asserted above).
+    #[test]
+    fn inspect_logs_windows_rejects_since_rather_than_widening() {
+        let intent = Intent::InspectLogs {
+            source: None,
+            since: Some("yesterday".to_owned()),
+            filter: None,
+        };
+        let err = render(&intent, Os::Windows).expect_err("since must be refused on Windows");
+        assert!(
+            matches!(
+                err,
+                AdapterError::InvalidParameter {
+                    intent: "inspect_logs",
+                    ..
+                }
+            ),
+            "expected InvalidParameter, got {err:?}"
+        );
+        // Sanity: macOS still honors `since` (no silent divergence there).
+        let mac = render(&intent, Os::MacOs).expect("macOS honors since");
+        assert_eq!(
+            as_exec(&mac).args.last().map(String::as_str),
+            Some("yesterday")
+        );
+    }
+
+    /// `source` and `filter` are unimplemented on every OS, so a request carrying
+    /// either is rejected uniformly — never silently dropped to a broader query.
+    #[test]
+    fn inspect_logs_rejects_source_and_filter_on_all_supported_os() {
+        for os in [Os::MacOs, Os::Linux, Os::Windows] {
+            let with_source = Intent::InspectLogs {
+                source: Some("Application".to_owned()),
+                since: None,
+                filter: None,
+            };
+            assert!(
+                matches!(
+                    render(&with_source, os),
+                    Err(AdapterError::InvalidParameter {
+                        intent: "inspect_logs",
+                        ..
+                    })
+                ),
+                "source must be rejected on {os:?}"
+            );
+            let with_filter = Intent::InspectLogs {
+                source: None,
+                since: None,
+                filter: Some("error".to_owned()),
+            };
+            assert!(
+                matches!(
+                    render(&with_filter, os),
+                    Err(AdapterError::InvalidParameter {
+                        intent: "inspect_logs",
+                        ..
+                    })
+                ),
+                "filter must be rejected on {os:?}"
+            );
+        }
     }
 
     // ── CheckSystemHealth ─────────────────────────────────────────────────────

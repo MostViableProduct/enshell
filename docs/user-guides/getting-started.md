@@ -144,7 +144,10 @@ unsupported on Windows for now: `find_process_using_port`, `find_large_files`, a
 `disk_usage` have no precise command form that avoids a PowerShell *cmdlet* (and
 enShell never runs a shell), while `open_file_or_folder` needs Windows-aware path
 validation (drive letters vs URI schemes, UNC/network paths) that is deferred to its
-own slice. enShell refuses these on Windows rather than guessing.
+own slice. enShell refuses these on Windows rather than guessing. One supported
+workflow is also narrower on Windows: `inspect_logs` shows only **recent** logs there
+— a time-qualified request ("logs since yesterday") is **refused**, not silently
+broadened, until the Windows time query lands (macOS/Linux honor the time window).
 
 Notes:
 
