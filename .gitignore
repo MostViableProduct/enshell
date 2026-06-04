@@ -14,3 +14,8 @@
 # OS files
 .DS_Store
 Thumbs.db
+
+# Generated SBOMs (CycloneDX) — produced by `cargo cyclonedx` and published as a
+# CI artifact, never committed (non-deterministic serialNumber/timestamp).
+*.cdx.json
+/sbom/

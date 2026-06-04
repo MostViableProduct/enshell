@@ -42,9 +42,10 @@ copyleft-free. Some other crates merely offer `Zlib` as an `OR` alternative.)
 This is **enforced by `cargo deny check`** on every push and pull request
 (`.github/workflows/ci.yml`): a dependency whose license is not satisfiable from the
 allowlist fails CI. Because the tree is now too large to enumerate by hand without
-drift, the authoritative per-crate inventory is the lockfile + `cargo deny`; a
-machine-generated SBOM / notice file (`cargo about`, `cargo cyclonedx`) is the
-planned mechanism for a frozen per-crate listing (see below).
+drift, the authoritative per-crate inventory is the lockfile + `cargo deny`, plus a
+**machine-generated CycloneDX SBOM** produced on every CI run by `cargo cyclonedx`
+(published as the `sbom-cyclonedx` build artifact; see below). A human-readable
+notice file via `cargo about` remains planned.
 
 ---
 
@@ -61,21 +62,23 @@ be listed here with:
 - **Bundled or linked** — whether the dependency is statically linked, dynamically
   linked, or invoked as a subprocess.
 
-Planned CI tooling (per `docs/planning/enshell-ai-native-shell-plan.md` §10 and
-§13):
+CI tooling (per `docs/planning/enshell-ai-native-shell-plan.md` §10 and §13):
 
-- **`cargo about`** — generates a human-readable notice file from the dependency
-  tree. Run with:
+- **`cargo deny`** *(implemented)* — enforces a license allowlist; the CI build
+  fails on disallowed or unknown licenses. Configuration lives in `deny.toml`.
+- **`cargo cyclonedx`** *(implemented)* — the `SBOM (CycloneDX)` CI job generates a
+  CycloneDX 1.5 JSON SBOM per workspace crate (default features) on every push/PR
+  and uploads them as the `sbom-cyclonedx` artifact. `enshell-cli.cdx.json` is the
+  SBOM for the shipped `enshell` binary. Tool version is pinned (`cargo-cyclonedx@0.5.9`).
+  SBOMs are **not** committed (their `serialNumber`/`timestamp` are non-deterministic);
+  download them from the run, or attach them to a release.
+- **`cargo about`** *(planned)* — generates a human-readable notice file from the
+  dependency tree. Run with:
   ```
   cargo about generate about.hbs > THIRD_PARTY_NOTICES.md
   ```
-- **`cargo deny`** — enforces a license allowlist; the CI build fails on
-  disallowed or unknown licenses. Configuration lives in `deny.toml`.
-- **`cargo cyclonedx`** — generates a CycloneDX SBOM per release artifact.
-
-Once those tools are wired in, this file will be generated and checked in as part
-of every release build. The generated content will replace the placeholder text
-in this section.
+  Once wired in, the human-readable per-crate listing in this file will be
+  generated rather than hand-maintained.
 
 ---
 

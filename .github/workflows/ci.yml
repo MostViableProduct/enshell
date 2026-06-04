@@ -103,6 +103,43 @@ jobs:
       - name: License / advisory / bans / sources check
         run: cargo deny --all-features check
 
+  # Generates a machine-readable CycloneDX SBOM and publishes it as a build
+  # artifact (downloadable from the run; ready to attach to future releases).
+  # cargo-cyclonedx reads Cargo.lock + `cargo metadata` only — no build, no cmake.
+  # Default features: the SBOM describes the C-free binary that ships by default;
+  # the optional `llama` feature's extra Rust deps are license/advisory-scanned by
+  # the cargo-deny job above (--all-features). Pinned tool version per ci-deploy.
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-cyclonedx (pinned)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx@0.5.9
+
+      # One CycloneDX 1.5 JSON SBOM per workspace crate (named <crate>.cdx.json
+      # in each crate dir); collect them into sbom/. enshell-cli.cdx.json carries
+      # the full dependency tree of the shipped `enshell` binary.
+      - name: Generate CycloneDX SBOMs
+        run: |
+          cargo cyclonedx -f json --spec-version 1.5
+          mkdir -p sbom
+          find crates -name '*.cdx.json' -exec mv {} sbom/ \;
+          ls -l sbom/
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-cyclonedx
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+
   # Compile-checks the optional `llama` FFI provider so it cannot rot unnoticed
   # (the default jobs above deliberately keep llama.cpp's C++ out). ubuntu-only
   # (cheapest) and cached — the heavy llama-cpp-sys-2 C++ build only re-runs when
