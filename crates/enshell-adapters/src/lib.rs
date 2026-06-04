@@ -18,7 +18,7 @@
 //! | [`ListProcesses`] | `ps aux` | `ps aux` |
 //! | [`DiskUsage`] | `df -h` | `df -h` |
 //! | [`NetworkConnections`] | `netstat -an` | `ss -tuna` |
-//! | [`GitStatus`] | `git status` | `git status` |
+//! | [`GitStatus`] | `git --no-optional-locks status` | `git --no-optional-locks status` |
 //! | [`ShowMemory`] | `vm_stat` | `free -h` |
 //!
 //! # Deferred / out-of-scope
@@ -534,7 +534,11 @@ fn render_network_connections(os: Os) -> Result<CommandPlan, AdapterError> {
 
 fn render_git_status(os: Os) -> Result<CommandPlan, AdapterError> {
     match os {
-        Os::MacOs | Os::Linux => Ok(CommandPlan::exec("git", ["status"])),
+        // `--no-optional-locks` keeps this genuinely read-only: plain `git status`
+        // refreshes and rewrites the index as an optimization (taking the index
+        // lock). This global flag suppresses that optional write, so the rendered
+        // command matches the ReadOnly classification.
+        Os::MacOs | Os::Linux => Ok(CommandPlan::exec("git", ["--no-optional-locks", "status"])),
         Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
             intent: "git_status",
             os,
@@ -618,6 +622,25 @@ mod tests {
                 "{intent:?} unsupported on Windows"
             );
             assert!(!is_renderable(intent, Os::Windows));
+        }
+    }
+
+    /// `git_status` is classified ReadOnly, but plain `git status` refreshes and
+    /// rewrites the index as an optimization (taking the index lock). The
+    /// `--no-optional-locks` global flag suppresses that optional write, so the
+    /// rendered command actually matches the ReadOnly classification. This is a
+    /// load-bearing argument, not cosmetic — assert it on both supported OSes.
+    #[test]
+    fn git_status_renders_no_optional_locks_to_stay_read_only() {
+        for os in [Os::MacOs, Os::Linux] {
+            let plan = render(&Intent::GitStatus {}, os).expect("render ok");
+            let step = as_exec(&plan);
+            assert_eq!(step.program, "git", "git_status program on {os:?}");
+            assert_eq!(
+                step.args,
+                vec!["--no-optional-locks", "status"],
+                "git_status must suppress the optional index write on {os:?}"
+            );
         }
     }
 

@@ -128,7 +128,7 @@ command is always shown in the preview (and via `--dry-run`):
 | "list running processes" | `list_processes` | `ps aux` | `ps aux` |
 | "show disk usage" | `disk_usage` | `df -h` | `df -h` |
 | "show network connections" | `network_connections` | `netstat -an` | `ss -tuna` |
-| "git status" | `git_status` | `git status` | `git status` |
+| "git status" | `git_status` | `git --no-optional-locks status` | `git --no-optional-locks status` |
 | "show memory usage" | `show_memory` | `vm_stat` | `free -h` |
 
 Notes:
