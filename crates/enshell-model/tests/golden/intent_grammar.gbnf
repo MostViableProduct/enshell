@@ -1,6 +1,6 @@
-root ::= "{" ws "\"intent\"" ws ":" ws intent_name ws "," ws "\"parameters\"" ws ":" ws object ws "," ws risk_field "\"requires_confirmation\"" ws ":" ws boolean ws "," ws "\"explanation\"" ws ":" ws string ws "," ws "\"confidence\"" ws ":" ws number ws "}" ws
-risk_field ::= ( "\"risk\"" ws ":" ws ( string | "null" ) ws "," ws )?
-intent_name ::= "\"find_large_files\"" | "\"find_process_using_port\"" | "\"kill_process\"" | "\"install_package\"" | "\"start_service\"" | "\"stop_service\"" | "\"open_file_or_folder\"" | "\"compress_folder\"" | "\"create_backup\"" | "\"explain_error\"" | "\"fix_last_command\"" | "\"update_packages\"" | "\"check_system_health\"" | "\"inspect_logs\"" | "\"list_processes\"" | "\"disk_usage\"" | "\"network_connections\"" | "\"git_status\"" | "\"show_memory\"" | "\"create_project\"" | "\"git_commit_changes\"" | "\"ask_clarification\""
+root ::= "{" ws "\"intent\"" ws ":" ws intent-name ws "," ws "\"parameters\"" ws ":" ws object ws "," ws risk-field "\"requires_confirmation\"" ws ":" ws boolean ws "," ws "\"explanation\"" ws ":" ws string ws "," ws "\"confidence\"" ws ":" ws number ws "}" ws
+risk-field ::= ( "\"risk\"" ws ":" ws ( string | "null" ) ws "," ws )?
+intent-name ::= "\"find_large_files\"" | "\"find_process_using_port\"" | "\"kill_process\"" | "\"install_package\"" | "\"start_service\"" | "\"stop_service\"" | "\"open_file_or_folder\"" | "\"compress_folder\"" | "\"create_backup\"" | "\"explain_error\"" | "\"fix_last_command\"" | "\"update_packages\"" | "\"check_system_health\"" | "\"inspect_logs\"" | "\"list_processes\"" | "\"disk_usage\"" | "\"network_connections\"" | "\"git_status\"" | "\"show_memory\"" | "\"create_project\"" | "\"git_commit_changes\"" | "\"ask_clarification\""
 object ::= "{" ws ( member ( "," ws member )* )? "}" ws
 member ::= string ws ":" ws value
 array ::= "[" ws ( value ( "," ws value )* )? "]" ws

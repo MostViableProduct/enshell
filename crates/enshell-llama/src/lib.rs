@@ -199,7 +199,19 @@ mod provider {
 
             let n_ctx = NonZeroU32::new(DEFAULT_N_CTX)
                 .ok_or_else(|| LlamaError::Config("context size must be non-zero".to_string()))?;
-            let ctx_params = LlamaContextParams::default().with_n_ctx(Some(n_ctx));
+            // `n_batch` is the max number of logical tokens accepted by a single
+            // `llama_decode`. enShell submits the entire prompt in one decode call,
+            // and that prompt is large — system prompt + the tool schema for every
+            // intent + few-shot examples is ~3.4k tokens. llama.cpp's default
+            // `n_batch` (512) is far smaller than that, so a full prompt trips
+            // `GGML_ASSERT(n_tokens_all <= n_batch)` and aborts the process. Size
+            // `n_batch` to the full context window: the prompt is already bounded
+            // to `< n_ctx` below, so this guarantees `prompt_tokens <= n_batch`.
+            // (`n_ubatch` keeps its default and may be smaller; llama.cpp splits the
+            // logical batch into physical micro-batches internally.)
+            let ctx_params = LlamaContextParams::default()
+                .with_n_ctx(Some(n_ctx))
+                .with_n_batch(DEFAULT_N_CTX);
 
             // SAFETY: We extend the lifetime of the `&model` borrow to `'static`. This is
             // sound because:

@@ -52,14 +52,14 @@ pub fn intent_grammar() -> String {
     GRAMMAR_TEMPLATE.replace("@INTENT_NAMES@", &alternation)
 }
 
-// One rule per line. `risk_field` is optional because `ProposedAction::risk` is
+// One rule per line. `risk-field` is optional because `ProposedAction::risk` is
 // `Option<RiskHint>` with `skip_serializing_if = "Option::is_none"` (omitted when
 // absent); it is left permissive (any string or null) since risk is advisory and
 // the policy engine re-derives the authoritative tier. The JSON building blocks
 // (object/array/value/string/number) are the standard llama.cpp json grammar.
-const GRAMMAR_TEMPLATE: &str = r#"root ::= "{" ws "\"intent\"" ws ":" ws intent_name ws "," ws "\"parameters\"" ws ":" ws object ws "," ws risk_field "\"requires_confirmation\"" ws ":" ws boolean ws "," ws "\"explanation\"" ws ":" ws string ws "," ws "\"confidence\"" ws ":" ws number ws "}" ws
-risk_field ::= ( "\"risk\"" ws ":" ws ( string | "null" ) ws "," ws )?
-intent_name ::= @INTENT_NAMES@
+const GRAMMAR_TEMPLATE: &str = r#"root ::= "{" ws "\"intent\"" ws ":" ws intent-name ws "," ws "\"parameters\"" ws ":" ws object ws "," ws risk-field "\"requires_confirmation\"" ws ":" ws boolean ws "," ws "\"explanation\"" ws ":" ws string ws "," ws "\"confidence\"" ws ":" ws number ws "}" ws
+risk-field ::= ( "\"risk\"" ws ":" ws ( string | "null" ) ws "," ws )?
+intent-name ::= @INTENT_NAMES@
 object ::= "{" ws ( member ( "," ws member )* )? "}" ws
 member ::= string ws ":" ws value
 array ::= "[" ws ( value ( "," ws value )* )? "]" ws
@@ -126,14 +126,14 @@ mod tests {
     #[test]
     fn grammar_makes_risk_optional() {
         let g = intent_grammar();
-        // `risk_field` wraps its body in `( ... )?` so an omitted risk key is legal.
+        // `risk-field` wraps its body in `( ... )?` so an omitted risk key is legal.
         let risk_rule = g
             .lines()
-            .find(|l| l.trim_start().starts_with("risk_field ::="))
-            .expect("risk_field rule present");
+            .find(|l| l.trim_start().starts_with("risk-field ::="))
+            .expect("risk-field rule present");
         assert!(
             risk_rule.contains("(") && risk_rule.trim_end().ends_with(")?"),
-            "risk_field must be optional: {risk_rule}"
+            "risk-field must be optional: {risk_rule}"
         );
     }
 
@@ -201,6 +201,29 @@ mod tests {
             .collect()
     }
 
+    /// llama.cpp's GBNF parser (`is_word_char`) accepts rule-name characters
+    /// `[a-zA-Z0-9-]` only — **not** underscores. A rule name like `intent_name`
+    /// makes the real parser stop mid-identifier and reject the entire grammar
+    /// ("failed to parse grammar"), even though it is a perfectly valid Rust
+    /// string and passes the structural lint. This was found the hard way running
+    /// a real model; the check below is the regression guard.
+    #[test]
+    fn grammar_rule_names_use_llama_cpp_identifier_charset() {
+        let g = intent_grammar();
+        for (lhs, _) in rules(&g) {
+            let first = lhs.chars().next().expect("non-empty rule name");
+            assert!(
+                first.is_ascii_alphabetic(),
+                "rule name `{lhs}` must start with an ASCII letter"
+            );
+            assert!(
+                lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                "rule name `{lhs}` must use only [a-zA-Z0-9-] (llama.cpp GBNF \
+                 is_word_char); underscores make the real parser reject the grammar"
+            );
+        }
+    }
+
     #[test]
     fn grammar_is_structurally_well_formed() {
         let g = intent_grammar();
@@ -214,11 +237,13 @@ mod tests {
         for (lhs, rhs) in &rules {
             let stripped = strip_literals_and_classes(rhs);
             for tok in stripped
-                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .split(|c: char| !(c.is_alphanumeric() || c == '-'))
                 .filter(|t| !t.is_empty())
             {
                 let first = tok.chars().next().unwrap();
-                if first.is_alphabetic() || first == '_' {
+                // GBNF rule names are letter-initial `[a-zA-Z][a-zA-Z0-9-]*`
+                // (dashes are part of the name; see is_word_char in llama.cpp).
+                if first.is_alphabetic() {
                     assert!(
                         defined.contains(tok),
                         "rule `{lhs}` references undefined rule `{tok}`"
