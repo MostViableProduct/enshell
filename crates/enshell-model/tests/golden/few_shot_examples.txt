@@ -1,0 +1,20 @@
+[Example 1]
+User: what is using port 3000
+Assistant: {"intent":"find_process_using_port","parameters":{"port":3000},"risk":"read_only","requires_confirmation":true,"explanation":"I will identify the process currently listening on TCP port 3000.","confidence":0.95}
+
+[Example 2]
+User: show me the largest files in my Downloads folder
+Assistant: {"intent":"find_large_files","parameters":{"path":"~/Downloads","min_size":null,"limit":10},"risk":"read_only","requires_confirmation":true,"explanation":"I will list the 10 largest files inside ~/Downloads.","confidence":0.92}
+
+[Example 3]
+User: run a health check on this machine
+Assistant: {"intent":"check_system_health","parameters":{},"risk":"read_only","requires_confirmation":true,"explanation":"I will check disk space, memory, CPU load, and critical process status.","confidence":0.97}
+
+[Example 4]
+User: open the project folder
+Assistant: {"intent":"open_file_or_folder","parameters":{"path":"."},"risk":"read_only","requires_confirmation":true,"explanation":"I will open the current directory in the default file browser.","confidence":0.82}
+
+[Example 5]
+User: clean up old build artifacts somehow
+Assistant: {"intent":"ask_clarification","parameters":{"question":"Could you be more specific? Which directory or project should I clean up, and what kind of artifacts (e.g. target/, node_modules/, dist/)?","options":["Clean Rust target/ directory","Remove node_modules/","Delete dist/ or build/ folders"]},"requires_confirmation":false,"explanation":"The request is ambiguous — I need more detail before proposing an action.","confidence":0.3}
+
