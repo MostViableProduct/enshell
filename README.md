@@ -67,6 +67,8 @@ shouldn't guess at.
   tiers, the Confirmation Invariant, the no-shell executor, and the audit log.
 - 📄 **[Full plan](docs/planning/enshell-ai-native-shell-plan.md)** — the complete
   design, roadmap, and rationale. *Authoritative for the vision.*
+- 🧪 **[Model verification](docs/contributor-guides/model-verification.md)** — the
+  eval harness and how to measure a real Gemma model (contributors).
 - 🔒 **[`SECURITY.md`](SECURITY.md)** — reporting a vulnerability.
 
 ## Planned highlights

@@ -321,7 +321,9 @@ version = "0.0.0"
 dependencies = [
  "enshell-core",
  "enshell-intents",
+ "enshell-llama",
  "enshell-model",
+ "enshell-os",
  "serde",
  "serde_json",
 ]

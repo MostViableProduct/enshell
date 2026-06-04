@@ -13,8 +13,9 @@
 //! NL→intent path — so the harness measures the product, not a reimplementation.
 
 use enshell_core::{Orchestrator, OrchestratorConfig, Resolved};
-use enshell_intents::Intent;
-use enshell_model::ModelProvider;
+use enshell_intents::{parse_model_output, Intent};
+use enshell_model::{ModelProvider, ModelRequest};
+use enshell_os::current_os;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -168,6 +169,49 @@ pub fn run<P: ModelProvider>(provider: P, cases: &[EvalCase]) -> Report {
     }
 }
 
+/// Run `cases` through the **provider in isolation** — bypassing the fast path —
+/// so every case actually exercises the model.
+///
+/// This is what a *model-accuracy* eval wants: [`run`] goes through
+/// `Orchestrator::resolve`, where the deterministic fast path would resolve the
+/// common phrasings without ever calling the model, masking the model's real
+/// accuracy. Here we call `provider.infer` + [`parse_model_output`] directly —
+/// the canonical provider contract — so the number reflects the model. Use this
+/// for `enshell-eval --model <gguf>`; use [`run`] for the end-to-end view.
+pub fn run_provider_only<P: ModelProvider>(provider: P, cases: &[EvalCase]) -> Report {
+    let mut passed = 0;
+    let mut failures = Vec::new();
+
+    for case in cases {
+        let req = ModelRequest {
+            user_request: case.nl.clone(),
+            os: current_os(),
+            cwd: None,
+        };
+        // infer (untrusted string) -> validate -> typed intent; AskClarification
+        // and any error count as "no intent" (a fail for a concrete-intent case).
+        let produced: Option<Intent> = provider
+            .infer(&req)
+            .ok()
+            .and_then(|raw| parse_model_output(&raw).ok())
+            .and_then(|action| match action.intent {
+                Intent::AskClarification { .. } => None,
+                other => Some(other),
+            });
+
+        match score_case(case, produced.as_ref()) {
+            Outcome::Pass => passed += 1,
+            Outcome::Fail(reason) => failures.push((case.id.clone(), reason)),
+        }
+    }
+
+    Report {
+        total: cases.len(),
+        passed,
+        failures,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -192,6 +236,20 @@ mod tests {
         assert_eq!(
             report.passed, report.total,
             "eval failures: {:?}",
+            report.failures
+        );
+    }
+
+    /// The fixtures must ALSO be resolvable provider-only (fast path bypassed), so
+    /// a real-model `--model` run measures against cases the model can actually
+    /// reach — not ones the fast path was silently covering.
+    #[test]
+    fn read_only_fixture_passes_provider_only_against_stub() {
+        let cases = load_cases(READ_ONLY_FIXTURE).expect("fixture parses");
+        let report = run_provider_only(StubProvider, &cases);
+        assert_eq!(
+            report.passed, report.total,
+            "provider-only eval failures: {:?}",
             report.failures
         );
     }
