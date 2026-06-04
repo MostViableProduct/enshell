@@ -1039,7 +1039,18 @@ fn run_doctor(timeout: Option<Duration>) {
         }
     };
     println!("Selected provider: {provider_label}");
-    println!("Adapters:        read-only adapters available for macOS and Linux");
+    let adapters_line = match os {
+        enshell_os::Os::MacOs | enshell_os::Os::Linux => {
+            "read-only adapters available for this OS (all 10 workflows)"
+        }
+        enshell_os::Os::Windows => {
+            "read-only adapters available for this OS (partial — 6 of 10 workflows; \
+             find-process-using-port, find-large-files, disk-usage, and open-file-or-folder \
+             are deferred — see the getting-started guide)"
+        }
+        enshell_os::Os::Other => "no read-only adapters available for this OS",
+    };
+    println!("Adapters:        {adapters_line}");
     println!("Configured timeout: {timeout_str}");
 
     // Shell integration status — privacy-minimal capture (cwd + last exit code).

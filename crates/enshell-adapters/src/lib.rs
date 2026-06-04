@@ -8,18 +8,18 @@
 //!
 //! Read-only intents on **macOS** and **Linux**:
 //!
-//! | Intent | macOS | Linux |
-//! |---|---|---|
-//! | [`FindProcessUsingPort`] | `lsof -i :<port>` | `ss -lptn 'sport = :<port>'` |
-//! | [`FindLargeFiles`] | `du -ah <path> \| sort -rh \| head -n <limit>` | same |
-//! | [`OpenFileOrFolder`] | `open <path>` | `xdg-open <path>` |
-//! | [`InspectLogs`] | `log show --style syslog --last <since>` | `journalctl --no-pager -n 200 [--since <since>]` |
-//! | [`CheckSystemHealth`] | `df -h; uptime; vm_stat` (Sequence) | `df -h; uptime; free -h` (Sequence) |
-//! | [`ListProcesses`] | `ps aux` | `ps aux` |
-//! | [`DiskUsage`] | `df -h` | `df -h` |
-//! | [`NetworkConnections`] | `netstat -an` | `ss -tuna` |
-//! | [`GitStatus`] | `git --no-optional-locks status` | `git --no-optional-locks status` |
-//! | [`ShowMemory`] | `vm_stat` | `free -h` |
+//! | Intent | macOS | Linux | Windows |
+//! |---|---|---|---|
+//! | [`FindProcessUsingPort`] | `lsof -i :<port>` | `ss -lptn 'sport = :<port>'` | — (deferred) |
+//! | [`FindLargeFiles`] | `du -ah <path> \| sort -rh \| head -n <limit>` | same | — (deferred) |
+//! | [`OpenFileOrFolder`] | `open <path>` | `xdg-open <path>` | — (deferred) |
+//! | [`InspectLogs`] | `log show --style syslog --last <since>` | `journalctl --no-pager -n 200 [--since <since>]` | `wevtutil qe System /c:200 /rd:true /f:text` |
+//! | [`CheckSystemHealth`] | `df -h; uptime; vm_stat` (Sequence) | `df -h; uptime; free -h` (Sequence) | `systeminfo` |
+//! | [`ListProcesses`] | `ps aux` | `ps aux` | `tasklist` |
+//! | [`DiskUsage`] | `df -h` | `df -h` | — (deferred) |
+//! | [`NetworkConnections`] | `netstat -an` | `ss -tuna` | `netstat -an` |
+//! | [`GitStatus`] | `git --no-optional-locks status` | `git --no-optional-locks status` | `git --no-optional-locks status` |
+//! | [`ShowMemory`] | `vm_stat` | `free -h` | `systeminfo` |
 //!
 //! # Deferred / out-of-scope
 //!
@@ -34,7 +34,25 @@
 //!   `StopService`, `UpdatePackages`) → [`AdapterError::NotYetImplemented`].
 //! - `ExplainError`, `FixLastCommand`, `AskClarification` → [`AdapterError::Unsupported`]
 //!   (these are handled by the explanation/clarification layer, not by a shell command).
-//! - `Os::Windows` / `Os::Other` → [`AdapterError::UnsupportedOs`].
+//! - `Os::Other` → [`AdapterError::UnsupportedOs`] for every intent.
+//! - **Windows deferrals.** Windows renders the six intents above that have a
+//!   genuine no-shell `.exe` form. Four are deferred to a later slice because
+//!   their correct Windows form is a PowerShell *cmdlet* (no standalone exe), and
+//!   [`CommandPlan::RequiresShell`] is denied by the executor — so a cmdlet plan
+//!   could never run. Rather than ship a rendering that cannot execute (or one
+//!   that returns wrong results), they stay [`AdapterError::UnsupportedOs`]:
+//!     - [`FindProcessUsingPort`]: precise form is `Get-NetTCPConnection -LocalPort`;
+//!       the no-shell `netstat | findstr :<port>` matches the port as a *text
+//!       substring* (false-matches `:30000` for `:3000`, and remote endpoints),
+//!       a semantic regression versus `lsof`/`ss`.
+//!     - [`FindLargeFiles`]: recursive size-sort is `Get-ChildItem | Sort-Object
+//!       Length | Select-Object` — no classic exe sorts by size.
+//!     - [`DiskUsage`]: all-volumes free space is `Get-PSDrive`/`Get-Volume`
+//!       (or deprecated `wmic`); no stable classic exe.
+//!     - [`OpenFileOrFolder`]: needs Windows-aware path validation (drive letters
+//!       vs URI schemes, UNC/network paths, `%USERPROFILE%` vs `$HOME`); the
+//!       handler-launching intent's validation gets its own slice, not a rushed
+//!       breadth pass.
 //!
 //! [`FindProcessUsingPort`]: enshell_intents::Intent::FindProcessUsingPort
 //! [`FindLargeFiles`]: enshell_intents::Intent::FindLargeFiles
@@ -328,7 +346,7 @@ pub fn render(intent: &Intent, os: Os) -> Result<CommandPlan, AdapterError> {
 ///
 /// # Returns `true` for
 ///
-/// The supported read-only intents on [`Os::MacOs`] and [`Os::Linux`]:
+/// All ten supported read-only intents on [`Os::MacOs`] and [`Os::Linux`]:
 /// - [`Intent::FindProcessUsingPort`]
 /// - [`Intent::FindLargeFiles`]
 /// - [`Intent::OpenFileOrFolder`]
@@ -340,6 +358,11 @@ pub fn render(intent: &Intent, os: Os) -> Result<CommandPlan, AdapterError> {
 /// - [`Intent::GitStatus`]
 /// - [`Intent::ShowMemory`]
 ///
+/// On [`Os::Windows`], the subset with a no-shell `.exe` rendering:
+/// [`Intent::InspectLogs`], [`Intent::CheckSystemHealth`],
+/// [`Intent::ListProcesses`], [`Intent::NetworkConnections`],
+/// [`Intent::GitStatus`], [`Intent::ShowMemory`].
+///
 /// # Returns `false` for
 ///
 /// - Intents with no command equivalent (`ExplainError`, `FixLastCommand`,
@@ -347,25 +370,45 @@ pub fn render(intent: &Intent, os: Os) -> Result<CommandPlan, AdapterError> {
 /// - Write / system intents (`InstallPackage`, `KillProcess`, `CompressFolder`,
 ///   `CreateBackup`, `CreateProject`, `GitCommitChanges`, `StartService`,
 ///   `StopService`, `UpdatePackages`) — not yet implemented in this slice.
-/// - [`Os::Windows`] and [`Os::Other`] — not supported for any intent.
+/// - On [`Os::Windows`]: [`Intent::FindProcessUsingPort`],
+///   [`Intent::FindLargeFiles`], [`Intent::DiskUsage`], and
+///   [`Intent::OpenFileOrFolder`] — deferred (see the module-level "Windows
+///   deferrals" note).
+/// - [`Os::Other`] — not supported for any intent.
+///
+/// This must stay in lock-step with [`render`]: an intent/OS pair is renderable
+/// here iff [`render`] returns `Ok` for some valid instance of it. The
+/// `is_renderable` ⇔ `render` agreement is asserted by the Windows render
+/// matrix test.
 pub fn is_renderable(intent: &Intent, os: Os) -> bool {
     match os {
-        Os::Windows | Os::Other => return false,
-        Os::MacOs | Os::Linux => {}
+        Os::Other => false,
+        Os::MacOs | Os::Linux => matches!(
+            intent,
+            Intent::FindProcessUsingPort { .. }
+                | Intent::FindLargeFiles { .. }
+                | Intent::OpenFileOrFolder { .. }
+                | Intent::InspectLogs { .. }
+                | Intent::CheckSystemHealth {}
+                | Intent::ListProcesses {}
+                | Intent::DiskUsage {}
+                | Intent::NetworkConnections {}
+                | Intent::GitStatus {}
+                | Intent::ShowMemory {}
+        ),
+        // Windows: only the intents with a genuine no-shell `.exe` form.
+        // FindProcessUsingPort / FindLargeFiles / DiskUsage / OpenFileOrFolder
+        // are deferred — see the module-level "Windows deferrals" note.
+        Os::Windows => matches!(
+            intent,
+            Intent::InspectLogs { .. }
+                | Intent::CheckSystemHealth {}
+                | Intent::ListProcesses {}
+                | Intent::NetworkConnections {}
+                | Intent::GitStatus {}
+                | Intent::ShowMemory {}
+        ),
     }
-    matches!(
-        intent,
-        Intent::FindProcessUsingPort { .. }
-            | Intent::FindLargeFiles { .. }
-            | Intent::OpenFileOrFolder { .. }
-            | Intent::InspectLogs { .. }
-            | Intent::CheckSystemHealth {}
-            | Intent::ListProcesses {}
-            | Intent::DiskUsage {}
-            | Intent::NetworkConnections {}
-            | Intent::GitStatus {}
-            | Intent::ShowMemory {}
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +429,10 @@ fn render_find_process_using_port(port: u16, os: Os) -> Result<CommandPlan, Adap
                 ["-lptn", &format!("sport = :{port}")],
             ))
         }
+        // Windows deferred: the precise form is the PowerShell cmdlet
+        // `Get-NetTCPConnection -LocalPort`, which RequiresShell can't run; the
+        // no-shell `netstat | findstr` matches the port as a text substring (a
+        // semantic regression). See the module "Windows deferrals" note.
         Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
             intent: "find_process_using_port",
             os,
@@ -408,6 +455,8 @@ fn render_find_large_files(
                 ExecStep::new("head", ["-n", &n]),
             ]))
         }
+        // Windows deferred: recursive size-sort is `Get-ChildItem | Sort-Object
+        // Length | Select-Object` (PowerShell); no classic exe sorts by size.
         Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
             intent: "find_large_files",
             os,
@@ -418,6 +467,13 @@ fn render_find_large_files(
 fn render_open_file_or_folder(path: &str, os: Os) -> Result<CommandPlan, AdapterError> {
     // Reject unsupported OS first (preserves UnsupportedOs for Windows/Other
     // even when the path string might look like a URI scheme, e.g. "C:\file").
+    //
+    // Windows is deferred here, NOT merely unimplemented: this is the one
+    // handler-launching intent, and its path validation must be Windows-aware
+    // (a drive-letter path `C:\x` is local but `looks_like_url_or_scheme`
+    // flags it as a scheme; UNC `\\host\share` is network; `~` expands via
+    // `$HOME`, not `%USERPROFILE%`). That correctness work gets its own slice
+    // rather than a rushed breadth pass. See the module "Windows deferrals" note.
     match os {
         Os::Windows | Os::Other => {
             return Err(AdapterError::UnsupportedOs {
@@ -473,7 +529,17 @@ fn render_inspect_logs(since: Option<&str>, os: Os) -> Result<CommandPlan, Adapt
                 args,
             }))
         }
-        Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
+        Os::Windows => {
+            // wevtutil qe System /c:200 /rd:true /f:text
+            // `qe` (query-events) is read-only; /rd:true = newest first; /c:200 =
+            // cap at 200 events; /f:text = plain text. The `since` filter is
+            // deferred on Windows (it would need a verbose XPath query string).
+            Ok(CommandPlan::exec(
+                "wevtutil",
+                ["qe", "System", "/c:200", "/rd:true", "/f:text"],
+            ))
+        }
+        Os::Other => Err(AdapterError::UnsupportedOs {
             intent: "inspect_logs",
             os,
         }),
@@ -492,7 +558,13 @@ fn render_check_system_health(os: Os) -> Result<CommandPlan, AdapterError> {
             ExecStep::new("uptime", [] as [&str; 0]),
             ExecStep::new("free", ["-h"]),
         ])),
-        Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
+        // `systeminfo` is the canonical one-shot Windows inventory exe: OS,
+        // total/available physical memory, and boot time (uptime proxy). It does
+        // NOT include per-volume disk free space — that detail is deferred on
+        // Windows (see DiskUsage). A single Exec rather than the macOS/Linux
+        // 3-step Sequence.
+        Os::Windows => Ok(CommandPlan::exec("systeminfo", [] as [&str; 0])),
+        Os::Other => Err(AdapterError::UnsupportedOs {
             intent: "check_system_health",
             os,
         }),
@@ -503,7 +575,9 @@ fn render_list_processes(os: Os) -> Result<CommandPlan, AdapterError> {
     match os {
         // `ps aux` is accepted on both macOS (BSD) and Linux.
         Os::MacOs | Os::Linux => Ok(CommandPlan::exec("ps", ["aux"])),
-        Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
+        // `tasklist` is the Windows equivalent: a read-only process snapshot exe.
+        Os::Windows => Ok(CommandPlan::exec("tasklist", [] as [&str; 0])),
+        Os::Other => Err(AdapterError::UnsupportedOs {
             intent: "list_processes",
             os,
         }),
@@ -513,6 +587,8 @@ fn render_list_processes(os: Os) -> Result<CommandPlan, AdapterError> {
 fn render_disk_usage(os: Os) -> Result<CommandPlan, AdapterError> {
     match os {
         Os::MacOs | Os::Linux => Ok(CommandPlan::exec("df", ["-h"])),
+        // Windows deferred: all-volumes free space is `Get-PSDrive`/`Get-Volume`
+        // (PowerShell) or the deprecated `wmic`; no stable classic exe.
         Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
             intent: "disk_usage",
             os,
@@ -525,7 +601,10 @@ fn render_network_connections(os: Os) -> Result<CommandPlan, AdapterError> {
         // netstat on macOS; ss on Linux (tcp+udp, numeric, all).
         Os::MacOs => Ok(CommandPlan::exec("netstat", ["-an"])),
         Os::Linux => Ok(CommandPlan::exec("ss", ["-tuna"])),
-        Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
+        // Windows ships its own `netstat`; `-an` (all, numeric) is the same
+        // read-only listing as macOS.
+        Os::Windows => Ok(CommandPlan::exec("netstat", ["-an"])),
+        Os::Other => Err(AdapterError::UnsupportedOs {
             intent: "network_connections",
             os,
         }),
@@ -537,9 +616,13 @@ fn render_git_status(os: Os) -> Result<CommandPlan, AdapterError> {
         // `--no-optional-locks` keeps this genuinely read-only: plain `git status`
         // refreshes and rewrites the index as an optimization (taking the index
         // lock). This global flag suppresses that optional write, so the rendered
-        // command matches the ReadOnly classification.
-        Os::MacOs | Os::Linux => Ok(CommandPlan::exec("git", ["--no-optional-locks", "status"])),
-        Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
+        // command matches the ReadOnly classification. `git` is cross-platform,
+        // so Windows renders the identical argv (git must be installed/on PATH,
+        // same as the Unix adapters).
+        Os::MacOs | Os::Linux | Os::Windows => {
+            Ok(CommandPlan::exec("git", ["--no-optional-locks", "status"]))
+        }
+        Os::Other => Err(AdapterError::UnsupportedOs {
             intent: "git_status",
             os,
         }),
@@ -550,7 +633,11 @@ fn render_show_memory(os: Os) -> Result<CommandPlan, AdapterError> {
     match os {
         Os::MacOs => Ok(CommandPlan::exec("vm_stat", [] as [&str; 0])),
         Os::Linux => Ok(CommandPlan::exec("free", ["-h"])),
-        Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
+        // `systeminfo` reports Total/Available Physical Memory (coarser than
+        // vm_stat/free, but a real no-shell exe). No memory-only classic exe
+        // exists without PowerShell or the deprecated `wmic`.
+        Os::Windows => Ok(CommandPlan::exec("systeminfo", [] as [&str; 0])),
+        Os::Other => Err(AdapterError::UnsupportedOs {
             intent: "show_memory",
             os,
         }),
@@ -616,12 +703,13 @@ mod tests {
                 assert!(!plan_requires_shell(&plan), "{intent:?} must be shell-free");
                 assert_eq!(as_exec(&plan).program, want, "{intent:?} on {os:?}");
             }
-            // Unsupported OS: no command.
+            // `Os::Other` is the always-unsupported negative case. (Windows is now
+            // per-intent — covered exhaustively by `windows_render_matrix`.)
             assert!(
-                render(intent, Os::Windows).is_err(),
-                "{intent:?} unsupported on Windows"
+                render(intent, Os::Other).is_err(),
+                "{intent:?} unsupported on Os::Other"
             );
-            assert!(!is_renderable(intent, Os::Windows));
+            assert!(!is_renderable(intent, Os::Other));
         }
     }
 
@@ -642,6 +730,88 @@ mod tests {
                 "git_status must suppress the optional index write on {os:?}"
             );
         }
+    }
+
+    // ── Windows (Track C) ─────────────────────────────────────────────────────
+
+    /// Exhaustive Windows behavior for all ten read-only MVP intents.
+    ///
+    /// Six render to a no-shell `.exe`; four are deferred to a later slice (see
+    /// the module "Windows deferrals" note). Also asserts the
+    /// `is_renderable` ⇔ `render` lock-step invariant on Windows, and that the two
+    /// groups together account for all ten intents. Runs on every CI host because
+    /// `Os` is a plain value — Windows rendering is covered without a Windows runner.
+    #[test]
+    fn windows_render_matrix() {
+        // Supported on Windows: (intent, program, args). All no-shell `.exe` forms.
+        let supported: &[(Intent, &str, &[&str])] = &[
+            (
+                Intent::InspectLogs {
+                    source: None,
+                    since: None,
+                    filter: None,
+                },
+                "wevtutil",
+                &["qe", "System", "/c:200", "/rd:true", "/f:text"],
+            ),
+            (Intent::CheckSystemHealth {}, "systeminfo", &[]),
+            (Intent::ListProcesses {}, "tasklist", &[]),
+            (Intent::NetworkConnections {}, "netstat", &["-an"]),
+            (
+                Intent::GitStatus {},
+                "git",
+                &["--no-optional-locks", "status"],
+            ),
+            (Intent::ShowMemory {}, "systeminfo", &[]),
+        ];
+        for (intent, prog, args) in supported {
+            assert!(
+                is_renderable(intent, Os::Windows),
+                "{intent:?} must be renderable on Windows"
+            );
+            let plan = render(intent, Os::Windows).expect("render ok on Windows");
+            assert!(
+                !plan_requires_shell(&plan),
+                "{intent:?} must be shell-free on Windows"
+            );
+            let step = as_exec(&plan);
+            assert_eq!(step.program, *prog, "{intent:?} program on Windows");
+            let got: Vec<&str> = step.args.iter().map(String::as_str).collect();
+            assert_eq!(got.as_slice(), *args, "{intent:?} args on Windows");
+        }
+
+        // Deferred on Windows: UnsupportedOs error and not renderable.
+        let deferred: &[Intent] = &[
+            Intent::FindProcessUsingPort { port: 3000 },
+            Intent::FindLargeFiles {
+                path: "C:\\Users".to_owned(),
+                min_size: None,
+                limit: None,
+            },
+            Intent::DiskUsage {},
+            Intent::OpenFileOrFolder {
+                path: "C:\\file.txt".to_owned(),
+            },
+        ];
+        for intent in deferred {
+            assert!(
+                !is_renderable(intent, Os::Windows),
+                "{intent:?} must be deferred (not renderable) on Windows"
+            );
+            let err =
+                render(intent, Os::Windows).expect_err("deferred intent must error on Windows");
+            assert!(
+                matches!(err, AdapterError::UnsupportedOs { .. }),
+                "{intent:?} must be UnsupportedOs on Windows, got {err:?}"
+            );
+        }
+
+        // The two groups together cover all ten read-only MVP intents.
+        assert_eq!(
+            supported.len() + deferred.len(),
+            10,
+            "Windows matrix must cover all ten MVP read-only intents"
+        );
     }
 
     // ── Golden argv: FindProcessUsingPort ─────────────────────────────────────
@@ -1232,9 +1402,11 @@ mod tests {
     }
 
     #[test]
-    fn check_system_health_windows_returns_unsupported_os() {
+    fn check_system_health_other_returns_unsupported_os() {
+        // `Os::Other` stays unsupported (Windows now renders `systeminfo` — see
+        // `windows_render_matrix`).
         let intent = Intent::CheckSystemHealth {};
-        let err = render(&intent, Os::Windows).expect_err("should be UnsupportedOs");
+        let err = render(&intent, Os::Other).expect_err("should be UnsupportedOs");
         assert!(matches!(
             err,
             AdapterError::UnsupportedOs {
@@ -1554,9 +1726,12 @@ mod tests {
     }
 
     #[test]
-    fn is_renderable_check_system_health_windows_false() {
+    fn is_renderable_check_system_health_windows_true() {
+        // CheckSystemHealth now renders `systeminfo` on Windows (Track C).
         let intent = Intent::CheckSystemHealth {};
-        assert!(!is_renderable(&intent, Os::Windows));
+        assert!(is_renderable(&intent, Os::Windows));
+        // …but stays unsupported on Os::Other.
+        assert!(!is_renderable(&intent, Os::Other));
     }
 
     #[test]

@@ -19,15 +19,17 @@ enshell "show me what is using port 3000"
 
 enShell is in **early development**. Today it:
 
-- Runs **read-only** diagnostics only, on **macOS and Linux**.
+- Runs **read-only** diagnostics only, on **macOS and Linux** — plus a **subset on
+  Windows** (6 of the 10 workflows; see the table below).
 - Interprets requests with a built-in **deterministic stub model** by default — no
   model download, no network, works out of the box.
 - Recognises a small set of request families (below). Anything else is handled
   safely — a clarifying question when it's unrecognised, or a refusal when it maps to
   a known but not-yet-supported action (e.g. a package install). It never guesses.
 
-It does **not** yet run write/system actions, support Windows, or perform live
-inference with a downloaded Gemma model. See [Not yet available](#not-yet-available).
+It does **not** yet run write/system actions, support **every** workflow on Windows,
+or perform live inference with a downloaded Gemma model. See
+[Not yet available](#not-yet-available).
 
 ## Install and run
 
@@ -115,21 +117,34 @@ for those. The full rules are the Confirmation Invariant in
 
 ## What enShell understands today
 
-These read-only request families resolve end-to-end on macOS and Linux. The exact
-command is always shown in the preview (and via `--dry-run`):
+These read-only request families resolve end-to-end on macOS and Linux; a subset
+also resolves on **Windows** (the rest are deferred — see the Windows column and the
+note beneath the table). The exact command is always shown in the preview (and via
+`--dry-run`):
 
-| You can ask… | Intent | macOS | Linux |
-|---|---|---|---|
-| "what is using port 3000" | `find_process_using_port` | `lsof -i :3000` | `ss -lptn 'sport = :3000'` |
-| "find the largest files here" / "…in my Downloads folder" | `find_large_files` | `du -ah <path> \| sort -rh \| head -n 10` | same |
-| "run a system health check" | `check_system_health` | `df -h && uptime && vm_stat` | `df -h && uptime && free -h` |
-| "show me recent logs" | `inspect_logs` | `log show --style syslog --last 1h` | `journalctl --no-pager -n 200` |
-| "open /path/to/file" | `open_file_or_folder` | `open <path>` | `xdg-open <path>` |
-| "list running processes" | `list_processes` | `ps aux` | `ps aux` |
-| "show disk usage" | `disk_usage` | `df -h` | `df -h` |
-| "show network connections" | `network_connections` | `netstat -an` | `ss -tuna` |
-| "git status" | `git_status` | `git --no-optional-locks status` | `git --no-optional-locks status` |
-| "show memory usage" | `show_memory` | `vm_stat` | `free -h` |
+| You can ask… | Intent | macOS | Linux | Windows |
+|---|---|---|---|---|
+| "what is using port 3000" | `find_process_using_port` | `lsof -i :3000` | `ss -lptn 'sport = :3000'` | — (deferred) |
+| "find the largest files here" / "…in my Downloads folder" | `find_large_files` | `du -ah <path> \| sort -rh \| head -n 10` | same | — (deferred) |
+| "run a system health check" | `check_system_health` | `df -h && uptime && vm_stat` | `df -h && uptime && free -h` | `systeminfo` |
+| "show me recent logs" | `inspect_logs` | `log show --style syslog --last 1h` | `journalctl --no-pager -n 200` | `wevtutil qe System /c:200 /rd:true /f:text` |
+| "open /path/to/file" | `open_file_or_folder` | `open <path>` | `xdg-open <path>` | — (deferred) |
+| "list running processes" | `list_processes` | `ps aux` | `ps aux` | `tasklist` |
+| "show disk usage" | `disk_usage` | `df -h` | `df -h` | — (deferred) |
+| "show network connections" | `network_connections` | `netstat -an` | `ss -tuna` | `netstat -an` |
+| "git status" | `git_status` | `git --no-optional-locks status` | `git --no-optional-locks status` | `git --no-optional-locks status` |
+| "show memory usage" | `show_memory` | `vm_stat` | `free -h` | `systeminfo` |
+
+**Windows support (newly added, less battle-tested).** Windows renders the six
+workflows above that have a genuine no-shell `.exe` form. The rendered commands are
+unit-tested and the Windows build is compile-checked in CI, but end-to-end execution
+on Windows has had far less real-world testing than macOS/Linux — treat it as
+wired-but-young. The four "— (deferred)" workflows are intentionally left
+unsupported on Windows for now: `find_process_using_port`, `find_large_files`, and
+`disk_usage` have no precise command form that avoids a PowerShell *cmdlet* (and
+enShell never runs a shell), while `open_file_or_folder` needs Windows-aware path
+validation (drive letters vs URI schemes, UNC/network paths) that is deferred to its
+own slice. enShell refuses these on Windows rather than guessing.
 
 Notes:
 
@@ -230,7 +245,11 @@ than pretend:
 - **Write / system actions** — installing packages, starting/stopping services,
   deleting/compressing files, git commits, backups, etc. These are recognised but
   **refused** in the read-only MVP (planned for Phase 3, after safety testing).
-- **Windows** — only macOS and Linux are supported today.
+- **Full Windows parity** — Windows now runs 6 of the 10 read-only workflows
+  (newly added; rendered commands are unit-tested and the build is compile-checked
+  in CI, but end-to-end Windows execution is less battle-tested than macOS/Linux).
+  The remaining four (`find_process_using_port`, `find_large_files`, `disk_usage`,
+  `open_file_or_folder`) are deferred — see the request table above for why.
 - **`enshell undo` and `enshell fix-last`** — placeholders; they print a "not
   available yet" notice. `undo` needs recorded per-action undo plans; `fix-last`
   needs the last command's *text*, which is opt-in capture (not the default).

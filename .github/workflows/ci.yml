@@ -50,6 +50,36 @@ jobs:
       - name: Build (release)
         run: cargo build --workspace --release
 
+  # Windows is compile + clippy only (no test run). The build matrix above runs
+  # the full suite on ubuntu/macOS; on Windows some `enshell-os` execution tests
+  # spawn shell builtins (echo/true/cat) that behave differently under cmd.exe.
+  # The Windows *render* logic itself is unit-tested on every job (the adapter
+  # tests pass `Os::Windows` as a value, host-independently), so this job's role
+  # is to catch Windows-specific compile/clippy breaks in the newly-added Windows
+  # adapter arms. Default features only — the `llama` C++ build stays out, so no
+  # cmake is needed (bundled SQLite builds via the runner's MSVC toolchain).
+  windows-build:
+    name: windows build (compile + clippy)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # --all-targets so the test modules (which reference Os::Windows) are
+      # type-checked on Windows too, even though they are not executed here.
+      - name: Clippy (warnings denied)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace
+
   supply-chain:
     name: cargo-deny
     runs-on: ubuntu-latest
