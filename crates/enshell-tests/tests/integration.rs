@@ -8,7 +8,11 @@
 
 use enshell_adapters::{render, AdapterError};
 use enshell_intents::Intent;
-use enshell_os::{current_os, execute, plan_requires_shell, Os};
+use enshell_os::{current_os, plan_requires_shell, Os};
+// `execute` actually runs a CommandPlan, which only the `#[cfg(unix)]` full-chain
+// test below does; gating it keeps the Windows compile-check warning-clean.
+#[cfg(unix)]
+use enshell_os::execute;
 use enshell_policy::{
     auto_confirm_allowed, classify, is_mvp_executable, requires_typed_confirmation,
     ClassifyContext, RiskTier,

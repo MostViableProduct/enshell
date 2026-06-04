@@ -681,8 +681,15 @@ mod tests {
     use enshell_intents::{Intent, ProposedAction, RiskHint};
     use enshell_model::{ModelError, ModelProvider, ModelRequest};
     use enshell_os::{plan_requires_shell, Os};
-    use enshell_policy::{ClassifyContext, ConfirmationKind};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use enshell_policy::ClassifyContext;
+    // `ConfirmationKind` and `AtomicBool` are used only by the `#[cfg(unix)]`
+    // tests below (interactive-confirmation / cancellation paths), so gating
+    // them keeps the Windows compile-check warning-clean under `-D warnings`.
+    #[cfg(unix)]
+    use enshell_policy::ConfirmationKind;
+    #[cfg(unix)]
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     // -----------------------------------------------------------------------
@@ -749,6 +756,8 @@ mod tests {
         }
     }
 
+    // Used only by the `#[cfg(unix)]` interactive-confirmation tests below.
+    #[cfg(unix)]
     fn interactive_confirmation() -> Confirmation {
         Confirmation {
             yes_flag: false,
