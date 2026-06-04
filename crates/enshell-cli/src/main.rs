@@ -559,14 +559,16 @@ pub fn guided_install_message() -> String {
      To enable the real assistant, install a model:\n\
      \n\
      \x20 Model:   Gemma 4 E2B Instruct (Q4 GGUF, e.g. Q4_K_M)\n\
-     \x20 Size:    ~1-2 GB to download (runs comfortably in ~8 GB RAM)\n\
-     \x20 Source:  Google's official Gemma resources — https://ai.google.dev/gemma\n\
-     \x20          (find the exact per-version GGUF on the official model card; \
-     enShell does not host or mirror the weights)\n\
-     \x20 License: Apache-2.0 — verify the terms on the model card for the exact\n\
-     \x20          version you download (see MODEL_LICENSES.md; earlier Gemma\n\
-     \x20          versions used different terms). Downloading the model means\n\
-     \x20          accepting that model's license.\n\
+     \x20 Size:    ~3 GB to download for Q4_K_M (runs in ~8 GB RAM)\n\
+     \x20 Source:  The weights are Google's (https://ai.google.dev/gemma). GGUF\n\
+     \x20          builds for llama.cpp are community conversions — e.g. ggml-org\n\
+     \x20          (the llama.cpp team) or unsloth on Hugging Face; Google's own\n\
+     \x20          card serves the original weights, not GGUFs. enShell hosts and\n\
+     \x20          mirrors nothing — pick a Gemma 4 E2B Instruct Q4_K_M GGUF.\n\
+     \x20 License: Apache-2.0 — a GGUF is a requant of Google's Apache-2.0 weights;\n\
+     \x20          verify the license on the model card for the exact version you\n\
+     \x20          download (see MODEL_LICENSES.md; earlier Gemma versions used\n\
+     \x20          different terms). Downloading means accepting that license.\n\
      \n\
      Then place the .gguf file in ~/.enshell/models/ (enShell picks it up\n\
      automatically), or set ENSHELL_MODEL to its full path:\n\

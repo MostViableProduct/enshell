@@ -36,10 +36,35 @@ cargo run -p enshell-eval
 ### Prerequisites
 
 - A **C++ toolchain + `cmake`** (the `llama` feature compiles llama.cpp).
-- A **Gemma 4 E2B Instruct GGUF** (Q4, e.g. `Q4_K_M`). Download it from Google's
-  official Gemma resources (<https://ai.google.dev/gemma>) — enShell does not host
-  or mirror weights. Note the license on the model card (Gemma 4 is Apache-2.0;
-  verify per version). Downloading the model means accepting that model's license.
+- A **Gemma 4 E2B Instruct GGUF** (Q4, e.g. `Q4_K_M`). GGUF builds are community
+  conversions of Google's Apache-2.0 weights — Google's own card
+  (<https://ai.google.dev/gemma>) serves the original weights, **not** GGUFs.
+  enShell hosts/mirrors nothing; verify the Apache-2.0 license per version
+  (downloading means accepting that license).
+
+#### Reproducibility — the exact file this runbook was verified against
+
+| Field | Value |
+|---|---|
+| Repo | [`unsloth/gemma-4-E2B-it-GGUF`](https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF) — third-party Q4_K_M requant of Google's Apache-2.0 weights |
+| File | `gemma-4-E2B-it-Q4_K_M.gguf` |
+| Size | `3106736256` bytes (~3.11 GB) |
+| SHA-256 | `9378bc471710229ef165709b62e34bfb62231420ddaf6d729e727305b5b8672d` |
+
+Any equivalent Gemma 4 E2B Instruct **Q4_K_M** GGUF should give comparable
+accuracy; this file is pinned so the numbers below are reproducible. Download
+(no Hugging Face account needed) and verify integrity:
+
+```bash
+mkdir -p ~/.enshell/models
+curl -L --fail -o ~/.enshell/models/gemma-4-E2B-it-Q4_K_M.gguf \
+  https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf
+shasum -a 256 ~/.enshell/models/gemma-4-E2B-it-Q4_K_M.gguf
+# → 9378bc471710229ef165709b62e34bfb62231420ddaf6d729e727305b5b8672d
+```
+
+enShell auto-discovers `~/.enshell/models/*.gguf`, so the eval and CLI below find
+it without `--model`/`ENSHELL_MODEL` once it's in that directory.
 
 ### 1. Score the model against the fixtures
 
