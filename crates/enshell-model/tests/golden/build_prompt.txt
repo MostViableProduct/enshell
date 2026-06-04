@@ -281,6 +281,31 @@ ambiguous; use the `ask_clarification` intent for genuinely unclear requests.
       }
     },
     {
+      "description": "List the running processes.",
+      "name": "list_processes",
+      "parameters": {}
+    },
+    {
+      "description": "Show filesystem disk usage (free and used space).",
+      "name": "disk_usage",
+      "parameters": {}
+    },
+    {
+      "description": "Show active network connections and listening sockets.",
+      "name": "network_connections",
+      "parameters": {}
+    },
+    {
+      "description": "Show the git status of the current repository.",
+      "name": "git_status",
+      "parameters": {}
+    },
+    {
+      "description": "Show memory (RAM) usage.",
+      "name": "show_memory",
+      "parameters": {}
+    },
+    {
       "description": "Scaffold a new project from a template (e.g. a Rust binary, Next.js app).",
       "name": "create_project",
       "parameters": {

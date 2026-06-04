@@ -250,6 +250,31 @@ pub fn intent_tool_schema() -> Value {
                 }
             },
             {
+                "name": "list_processes",
+                "description": "List the running processes.",
+                "parameters": {}
+            },
+            {
+                "name": "disk_usage",
+                "description": "Show filesystem disk usage (free and used space).",
+                "parameters": {}
+            },
+            {
+                "name": "network_connections",
+                "description": "Show active network connections and listening sockets.",
+                "parameters": {}
+            },
+            {
+                "name": "git_status",
+                "description": "Show the git status of the current repository.",
+                "parameters": {}
+            },
+            {
+                "name": "show_memory",
+                "description": "Show memory (RAM) usage.",
+                "parameters": {}
+            },
+            {
                 "name": "create_project",
                 "description": "Scaffold a new project from a template (e.g. a Rust binary, Next.js app).",
                 "parameters": {
@@ -523,7 +548,7 @@ mod tests {
     // intent_tool_schema()
     // -----------------------------------------------------------------------
 
-    /// All 17 intent names from the catalog must appear in the schema.
+    /// All intent names from the catalog must appear in the schema.
     #[test]
     fn intent_tool_schema_contains_all_intents() {
         let schema = intent_tool_schema();
@@ -544,6 +569,11 @@ mod tests {
             "update_packages",
             "check_system_health",
             "inspect_logs",
+            "list_processes",
+            "disk_usage",
+            "network_connections",
+            "git_status",
+            "show_memory",
             "create_project",
             "git_commit_changes",
             "ask_clarification",
@@ -584,8 +614,8 @@ mod tests {
         let arr = intents.as_array().unwrap();
         assert_eq!(
             arr.len(),
-            17,
-            "catalog has exactly 17 intents; schema has {}",
+            22,
+            "catalog has exactly 22 intents; schema has {}",
             arr.len()
         );
     }

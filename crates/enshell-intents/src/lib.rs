@@ -168,6 +168,16 @@ pub enum Intent {
         since: Option<String>,
         filter: Option<String>,
     },
+    /// List running processes (read-only).
+    ListProcesses {},
+    /// Show filesystem disk usage (read-only).
+    DiskUsage {},
+    /// Show active network connections (read-only).
+    NetworkConnections {},
+    /// Show the git status of the current repository (read-only).
+    GitStatus {},
+    /// Show memory usage (read-only).
+    ShowMemory {},
     CreateProject {
         kind: String,
         name: String,
@@ -261,6 +271,12 @@ impl Intent {
             Intent::InspectLogs { .. } => {
                 // All optional.
             }
+            // Parameterless read-only diagnostics — nothing to validate.
+            Intent::ListProcesses {}
+            | Intent::DiskUsage {}
+            | Intent::NetworkConnections {}
+            | Intent::GitStatus {}
+            | Intent::ShowMemory {} => {}
             Intent::CreateProject { kind, name, .. } => {
                 require_nonempty_str(kind, "kind")?;
                 require_nonempty_str(name, "name")?;
@@ -455,6 +471,13 @@ struct UpdatePackagesParams {
 #[serde(deny_unknown_fields)]
 struct CheckSystemHealthParams {}
 
+/// Shared params type for the parameterless read-only diagnostics
+/// (list_processes, disk_usage, network_connections, git_status, show_memory):
+/// accepts `{}` and rejects any unknown key.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyParams {}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InspectLogsParams {
@@ -587,6 +610,26 @@ fn build_intent_strict(intent_name: &str, params: Value) -> Result<Intent, Inten
                 filter: p.filter,
             })
         }
+        "list_processes" => {
+            let _p: EmptyParams = parse_params!(EmptyParams)?;
+            Ok(Intent::ListProcesses {})
+        }
+        "disk_usage" => {
+            let _p: EmptyParams = parse_params!(EmptyParams)?;
+            Ok(Intent::DiskUsage {})
+        }
+        "network_connections" => {
+            let _p: EmptyParams = parse_params!(EmptyParams)?;
+            Ok(Intent::NetworkConnections {})
+        }
+        "git_status" => {
+            let _p: EmptyParams = parse_params!(EmptyParams)?;
+            Ok(Intent::GitStatus {})
+        }
+        "show_memory" => {
+            let _p: EmptyParams = parse_params!(EmptyParams)?;
+            Ok(Intent::ShowMemory {})
+        }
         "create_project" => {
             let p: CreateProjectParams = parse_params!(CreateProjectParams)?;
             Ok(Intent::CreateProject {
@@ -630,6 +673,11 @@ const KNOWN_INTENT_NAMES: &[&str] = &[
     "update_packages",
     "check_system_health",
     "inspect_logs",
+    "list_processes",
+    "disk_usage",
+    "network_connections",
+    "git_status",
+    "show_memory",
     "create_project",
     "git_commit_changes",
     "ask_clarification",

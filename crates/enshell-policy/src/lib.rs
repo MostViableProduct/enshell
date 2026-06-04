@@ -231,6 +231,26 @@ pub fn classify(intent: &Intent, ctx: &ClassifyContext) -> RiskDecision {
             RiskTier::ReadOnly,
             "inspect_logs reads log streams without modifying them",
         ),
+        Intent::ListProcesses {} => tier_decision(
+            RiskTier::ReadOnly,
+            "list_processes reads the OS process table without modifying it",
+        ),
+        Intent::DiskUsage {} => tier_decision(
+            RiskTier::ReadOnly,
+            "disk_usage reports filesystem usage without modifying anything",
+        ),
+        Intent::NetworkConnections {} => tier_decision(
+            RiskTier::ReadOnly,
+            "network_connections lists active sockets read-only",
+        ),
+        Intent::GitStatus {} => tier_decision(
+            RiskTier::ReadOnly,
+            "git_status reports the working tree status without modifying it",
+        ),
+        Intent::ShowMemory {} => tier_decision(
+            RiskTier::ReadOnly,
+            "show_memory reports memory usage without modifying anything",
+        ),
 
         // ------------------------------------------------------------------
         // Local-write intents: create-only vs mutating depends on target state.
@@ -649,6 +669,24 @@ mod tests {
         };
         let d = classify(&intent, &ctx_absent());
         assert_eq!(d.tier, RiskTier::ReadOnly);
+    }
+
+    #[test]
+    fn new_diagnostics_are_read_only_and_mvp_executable() {
+        for intent in [
+            Intent::ListProcesses {},
+            Intent::DiskUsage {},
+            Intent::NetworkConnections {},
+            Intent::GitStatus {},
+            Intent::ShowMemory {},
+        ] {
+            let d = classify(&intent, &ctx_absent());
+            assert_eq!(d.tier, RiskTier::ReadOnly, "{intent:?} must be ReadOnly");
+            assert!(
+                is_mvp_executable(&d),
+                "{intent:?} (ReadOnly) must be MVP-executable"
+            );
+        }
     }
 
     // ------------------------------------------------------------------

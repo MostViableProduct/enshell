@@ -174,6 +174,32 @@ impl ModelProvider for StubProvider {
             )
         } else if let Some(intent) = try_match_open(&lower, &request.user_request) {
             build_proposed(intent, "I will open the specified file or folder.", 0.9)
+        } else if try_match_git_status(&lower) {
+            build_proposed(
+                Intent::GitStatus {},
+                "I will show the git status of the current repository.",
+                0.9,
+            )
+        } else if try_match_list_processes(&lower) {
+            build_proposed(
+                Intent::ListProcesses {},
+                "I will list the running processes.",
+                0.9,
+            )
+        } else if try_match_network(&lower) {
+            build_proposed(
+                Intent::NetworkConnections {},
+                "I will show active network connections.",
+                0.9,
+            )
+        } else if try_match_disk_usage(&lower) {
+            build_proposed(
+                Intent::DiskUsage {},
+                "I will show filesystem disk usage.",
+                0.9,
+            )
+        } else if try_match_memory(&lower) {
+            build_proposed(Intent::ShowMemory {}, "I will show memory usage.", 0.9)
         } else {
             build_proposed(
                 Intent::AskClarification {
@@ -256,6 +282,29 @@ fn try_match_health(lower: &str) -> bool {
 
 fn try_match_logs(lower: &str) -> bool {
     lower.contains("log")
+}
+
+// Read-only diagnostics. These run after the port/large-files/health/logs/open
+// matchers, so e.g. a port request is not stolen by the "process" keyword.
+fn try_match_git_status(lower: &str) -> bool {
+    lower.contains("git") && lower.contains("status")
+}
+
+fn try_match_list_processes(lower: &str) -> bool {
+    lower.contains("process")
+}
+
+fn try_match_network(lower: &str) -> bool {
+    lower.contains("network") || lower.contains("connection")
+}
+
+fn try_match_disk_usage(lower: &str) -> bool {
+    lower.contains("disk")
+}
+
+/// Matches "memory" only (not "ram", which is a substring of words like "program").
+fn try_match_memory(lower: &str) -> bool {
+    lower.contains("memory")
 }
 
 /// Returns an `OpenFileOrFolder` intent if the (lowercased) request starts with

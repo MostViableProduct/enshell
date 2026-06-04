@@ -86,8 +86,8 @@ mod tests {
         let names = intent_names();
         assert_eq!(
             names.len(),
-            17,
-            "expected all 17 catalog intents: {names:?}"
+            22,
+            "expected all 22 catalog intents: {names:?}"
         );
         assert!(names.contains(&"find_process_using_port".to_string()));
         assert!(names.contains(&"ask_clarification".to_string()));

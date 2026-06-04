@@ -125,6 +125,11 @@ command is always shown in the preview (and via `--dry-run`):
 | "run a system health check" | `check_system_health` | `df -h && uptime && vm_stat` | `df -h && uptime && free -h` |
 | "show me recent logs" | `inspect_logs` | `log show --style syslog --last 1h` | `journalctl --no-pager -n 200` |
 | "open /path/to/file" | `open_file_or_folder` | `open <path>` | `xdg-open <path>` |
+| "list running processes" | `list_processes` | `ps aux` | `ps aux` |
+| "show disk usage" | `disk_usage` | `df -h` | `df -h` |
+| "show network connections" | `network_connections` | `netstat -an` | `ss -tuna` |
+| "git status" | `git_status` | `git status` | `git status` |
+| "show memory usage" | `show_memory` | `vm_stat` | `free -h` |
 
 Notes:
 

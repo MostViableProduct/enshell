@@ -15,6 +15,11 @@
 //! | [`OpenFileOrFolder`] | `open <path>` | `xdg-open <path>` |
 //! | [`InspectLogs`] | `log show --style syslog --last <since>` | `journalctl --no-pager -n 200 [--since <since>]` |
 //! | [`CheckSystemHealth`] | `df -h; uptime; vm_stat` (Sequence) | `df -h; uptime; free -h` (Sequence) |
+//! | [`ListProcesses`] | `ps aux` | `ps aux` |
+//! | [`DiskUsage`] | `df -h` | `df -h` |
+//! | [`NetworkConnections`] | `netstat -an` | `ss -tuna` |
+//! | [`GitStatus`] | `git status` | `git status` |
+//! | [`ShowMemory`] | `vm_stat` | `free -h` |
 //!
 //! # Deferred / out-of-scope
 //!
@@ -36,6 +41,11 @@
 //! [`OpenFileOrFolder`]: enshell_intents::Intent::OpenFileOrFolder
 //! [`InspectLogs`]: enshell_intents::Intent::InspectLogs
 //! [`CheckSystemHealth`]: enshell_intents::Intent::CheckSystemHealth
+//! [`ListProcesses`]: enshell_intents::Intent::ListProcesses
+//! [`DiskUsage`]: enshell_intents::Intent::DiskUsage
+//! [`NetworkConnections`]: enshell_intents::Intent::NetworkConnections
+//! [`GitStatus`]: enshell_intents::Intent::GitStatus
+//! [`ShowMemory`]: enshell_intents::Intent::ShowMemory
 
 use std::fmt;
 
@@ -226,6 +236,16 @@ pub fn render(intent: &Intent, os: Os) -> Result<CommandPlan, AdapterError> {
 
         Intent::CheckSystemHealth {} => render_check_system_health(os),
 
+        Intent::ListProcesses {} => render_list_processes(os),
+
+        Intent::DiskUsage {} => render_disk_usage(os),
+
+        Intent::NetworkConnections {} => render_network_connections(os),
+
+        Intent::GitStatus {} => render_git_status(os),
+
+        Intent::ShowMemory {} => render_show_memory(os),
+
         // ── Unsupported: no command equivalent ───────────────────────────
         Intent::ExplainError { .. } => Err(AdapterError::Unsupported {
             intent: "explain_error",
@@ -314,6 +334,11 @@ pub fn render(intent: &Intent, os: Os) -> Result<CommandPlan, AdapterError> {
 /// - [`Intent::OpenFileOrFolder`]
 /// - [`Intent::InspectLogs`]
 /// - [`Intent::CheckSystemHealth`]
+/// - [`Intent::ListProcesses`]
+/// - [`Intent::DiskUsage`]
+/// - [`Intent::NetworkConnections`]
+/// - [`Intent::GitStatus`]
+/// - [`Intent::ShowMemory`]
 ///
 /// # Returns `false` for
 ///
@@ -335,6 +360,11 @@ pub fn is_renderable(intent: &Intent, os: Os) -> bool {
             | Intent::OpenFileOrFolder { .. }
             | Intent::InspectLogs { .. }
             | Intent::CheckSystemHealth {}
+            | Intent::ListProcesses {}
+            | Intent::DiskUsage {}
+            | Intent::NetworkConnections {}
+            | Intent::GitStatus {}
+            | Intent::ShowMemory {}
     )
 }
 
@@ -469,6 +499,60 @@ fn render_check_system_health(os: Os) -> Result<CommandPlan, AdapterError> {
     }
 }
 
+fn render_list_processes(os: Os) -> Result<CommandPlan, AdapterError> {
+    match os {
+        // `ps aux` is accepted on both macOS (BSD) and Linux.
+        Os::MacOs | Os::Linux => Ok(CommandPlan::exec("ps", ["aux"])),
+        Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
+            intent: "list_processes",
+            os,
+        }),
+    }
+}
+
+fn render_disk_usage(os: Os) -> Result<CommandPlan, AdapterError> {
+    match os {
+        Os::MacOs | Os::Linux => Ok(CommandPlan::exec("df", ["-h"])),
+        Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
+            intent: "disk_usage",
+            os,
+        }),
+    }
+}
+
+fn render_network_connections(os: Os) -> Result<CommandPlan, AdapterError> {
+    match os {
+        // netstat on macOS; ss on Linux (tcp+udp, numeric, all).
+        Os::MacOs => Ok(CommandPlan::exec("netstat", ["-an"])),
+        Os::Linux => Ok(CommandPlan::exec("ss", ["-tuna"])),
+        Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
+            intent: "network_connections",
+            os,
+        }),
+    }
+}
+
+fn render_git_status(os: Os) -> Result<CommandPlan, AdapterError> {
+    match os {
+        Os::MacOs | Os::Linux => Ok(CommandPlan::exec("git", ["status"])),
+        Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
+            intent: "git_status",
+            os,
+        }),
+    }
+}
+
+fn render_show_memory(os: Os) -> Result<CommandPlan, AdapterError> {
+    match os {
+        Os::MacOs => Ok(CommandPlan::exec("vm_stat", [] as [&str; 0])),
+        Os::Linux => Ok(CommandPlan::exec("free", ["-h"])),
+        Os::Windows | Os::Other => Err(AdapterError::UnsupportedOs {
+            intent: "show_memory",
+            os,
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -501,6 +585,39 @@ mod tests {
         match plan {
             CommandPlan::Sequence(steps) => steps,
             other => panic!("expected Sequence, got {other:?}"),
+        }
+    }
+
+    // ── New read-only diagnostics (Track B) ──────────────────────────────────
+
+    /// Each new parameterless diagnostic must render to a shell-free command on
+    /// macOS and Linux, with the expected program, and be `is_renderable`.
+    #[test]
+    fn new_readonly_intents_render_shell_free_with_expected_programs() {
+        // (intent, macOS program, Linux program)
+        let cases: &[(Intent, &str, &str)] = &[
+            (Intent::ListProcesses {}, "ps", "ps"),
+            (Intent::DiskUsage {}, "df", "df"),
+            (Intent::NetworkConnections {}, "netstat", "ss"),
+            (Intent::GitStatus {}, "git", "git"),
+            (Intent::ShowMemory {}, "vm_stat", "free"),
+        ];
+        for (intent, mac_prog, linux_prog) in cases {
+            for (os, want) in [(Os::MacOs, *mac_prog), (Os::Linux, *linux_prog)] {
+                assert!(
+                    is_renderable(intent, os),
+                    "{intent:?} must be renderable on {os:?}"
+                );
+                let plan = render(intent, os).expect("render ok");
+                assert!(!plan_requires_shell(&plan), "{intent:?} must be shell-free");
+                assert_eq!(as_exec(&plan).program, want, "{intent:?} on {os:?}");
+            }
+            // Unsupported OS: no command.
+            assert!(
+                render(intent, Os::Windows).is_err(),
+                "{intent:?} unsupported on Windows"
+            );
+            assert!(!is_renderable(intent, Os::Windows));
         }
     }
 

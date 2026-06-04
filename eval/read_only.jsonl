@@ -11,3 +11,9 @@
 {"id":"logs-short","nl":"show recent logs","kind":"inspect_logs","required":{},"allowed":[]}
 {"id":"open-notes","nl":"open /tmp/notes.txt","kind":"open_file_or_folder","required":{"path":"/tmp/notes.txt"},"allowed":[]}
 {"id":"open-home","nl":"open ~/Documents","kind":"open_file_or_folder","required":{"path":"~/Documents"},"allowed":[]}
+{"id":"list-processes","nl":"list running processes","kind":"list_processes","required":{},"allowed":[]}
+{"id":"list-processes-model","nl":"show me the running processes","kind":"list_processes","required":{},"allowed":[]}
+{"id":"disk-usage","nl":"show disk usage","kind":"disk_usage","required":{},"allowed":[]}
+{"id":"network-connections","nl":"show network connections","kind":"network_connections","required":{},"allowed":[]}
+{"id":"git-status","nl":"git status","kind":"git_status","required":{},"allowed":[]}
+{"id":"show-memory","nl":"show memory usage","kind":"show_memory","required":{},"allowed":[]}

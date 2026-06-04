@@ -50,6 +50,51 @@ const LOGS_PHRASES: &[&str] = &[
     "view recent logs",
 ];
 
+/// Phrasings that map to [`Intent::ListProcesses`].
+const LIST_PROCESSES_PHRASES: &[&str] = &[
+    "list processes",
+    "list running processes",
+    "show running processes",
+    "show me running processes",
+    "show processes",
+    "what processes are running",
+];
+
+/// Phrasings that map to [`Intent::DiskUsage`].
+const DISK_USAGE_PHRASES: &[&str] = &[
+    "show disk usage",
+    "disk usage",
+    "show disk space",
+    "check disk space",
+    "how much disk space",
+    "how much disk space is free",
+];
+
+/// Phrasings that map to [`Intent::NetworkConnections`].
+const NETWORK_PHRASES: &[&str] = &[
+    "show network connections",
+    "list network connections",
+    "show open connections",
+    "what network connections are open",
+];
+
+/// Phrasings that map to [`Intent::GitStatus`].
+const GIT_STATUS_PHRASES: &[&str] = &[
+    "git status",
+    "show git status",
+    "what's the git status",
+    "show me the git status",
+];
+
+/// Phrasings that map to [`Intent::ShowMemory`].
+const MEMORY_PHRASES: &[&str] = &[
+    "show memory usage",
+    "memory usage",
+    "show memory",
+    "how much memory is free",
+    "how much memory is used",
+];
+
 /// Phrasings that map to [`Intent::FindLargeFiles`] over the current directory.
 const LARGE_FILES_HERE: &[&str] = &[
     "find the largest files here",
@@ -157,6 +202,30 @@ pub fn fast_path_match(user_request: &str) -> Option<(Intent, &'static str)> {
             },
             "I will find the largest files in the specified directory.",
         ));
+    }
+    if LIST_PROCESSES_PHRASES.contains(&n) {
+        return Some((
+            Intent::ListProcesses {},
+            "I will list the running processes.",
+        ));
+    }
+    if DISK_USAGE_PHRASES.contains(&n) {
+        return Some((Intent::DiskUsage {}, "I will show filesystem disk usage."));
+    }
+    if NETWORK_PHRASES.contains(&n) {
+        return Some((
+            Intent::NetworkConnections {},
+            "I will show active network connections.",
+        ));
+    }
+    if GIT_STATUS_PHRASES.contains(&n) {
+        return Some((
+            Intent::GitStatus {},
+            "I will show the git status of the current repository.",
+        ));
+    }
+    if MEMORY_PHRASES.contains(&n) {
+        return Some((Intent::ShowMemory {}, "I will show memory usage."));
     }
 
     None
