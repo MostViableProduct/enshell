@@ -24,9 +24,11 @@ use std::fmt;
 // Prompt-construction module
 // ---------------------------------------------------------------------------
 
+pub mod grammar;
 pub mod prompt;
 
 // Re-export the key items at crate root for ergonomic access.
+pub use grammar::{intent_grammar, intent_names};
 pub use prompt::{build_prompt, few_shot_examples, intent_tool_schema, system_prompt, Prompt};
 
 // ---------------------------------------------------------------------------

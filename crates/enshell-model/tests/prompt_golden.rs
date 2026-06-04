@@ -20,7 +20,8 @@
 use std::path::PathBuf;
 
 use enshell_model::{
-    build_prompt, few_shot_examples, intent_tool_schema, system_prompt, ModelRequest,
+    build_prompt, few_shot_examples, intent_grammar, intent_tool_schema, system_prompt,
+    ModelRequest,
 };
 use enshell_os::Os;
 
@@ -95,4 +96,9 @@ fn golden_few_shot_examples() {
 fn golden_build_prompt() {
     let prompt = build_prompt(&canonical_request());
     check_golden("build_prompt.txt", &prompt.text);
+}
+
+#[test]
+fn golden_intent_grammar() {
+    check_golden("intent_grammar.gbnf", &intent_grammar());
 }

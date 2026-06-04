@@ -295,8 +295,19 @@ mod provider {
             ctx.decode(&mut batch)
                 .map_err(|e| LlamaError::Decode(e.to_string()))?;
 
-            // Greedy sampler chain: deterministic argmax selection.
-            let mut sampler = LlamaSampler::chain_simple([LlamaSampler::greedy()]);
+            // Grammar-constrained, greedy decode: the GBNF grammar (derived from
+            // the intent catalog) masks tokens that would break the ProposedAction
+            // JSON shape or use an unknown intent name, then greedy picks the
+            // highest-probability *valid* token — deterministic argmax among the
+            // grammar-legal tokens. This eliminates malformed-JSON / invented-intent
+            // failures at generation time; per-intent params are still validated by
+            // `parse_model_output` afterward.
+            let grammar = enshell_model::intent_grammar();
+            let grammar_sampler = LlamaSampler::grammar(self.model.as_ref(), &grammar, "root")
+                .map_err(|e| {
+                    LlamaError::Config(format!("failed to build the intent grammar sampler: {e}"))
+                })?;
+            let mut sampler = LlamaSampler::chain_simple([grammar_sampler, LlamaSampler::greedy()]);
 
             // Accumulate the raw decoded bytes. We decode the full buffer to a
             // String once at the end via `from_utf8_lossy`, which correctly
