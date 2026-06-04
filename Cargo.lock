@@ -316,6 +316,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "enshell-eval"
+version = "0.0.0"
+dependencies = [
+ "enshell-core",
+ "enshell-intents",
+ "enshell-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "enshell-intents"
 version = "0.0.0"
 dependencies = [

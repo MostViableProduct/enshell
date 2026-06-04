@@ -12,6 +12,7 @@ members = [
     "crates/enshell-os",
     "crates/enshell-memory",
     "crates/enshell-telemetry",
+    "crates/enshell-eval",
     "crates/enshell-tests",
 ]
 

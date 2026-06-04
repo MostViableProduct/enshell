@@ -1,0 +1,13 @@
+{"id":"port-3000","nl":"what is using port 3000","kind":"find_process_using_port","required":{"port":3000},"allowed":[]}
+{"id":"port-8080-listening","nl":"what is listening on port 8080","kind":"find_process_using_port","required":{"port":8080},"allowed":[]}
+{"id":"port-22-model","nl":"show me what is listening on port 22","kind":"find_process_using_port","required":{"port":22},"allowed":[]}
+{"id":"large-here-largest","nl":"find the largest files here","kind":"find_large_files","required":{"path":"."},"allowed":["limit"]}
+{"id":"large-here-biggest","nl":"find the biggest files here","kind":"find_large_files","required":{"path":"."},"allowed":["limit"]}
+{"id":"large-downloads","nl":"find the biggest files in my Downloads folder","kind":"find_large_files","required":{"path":"~/Downloads"},"allowed":["limit"]}
+{"id":"large-downloads-model","nl":"show me the biggest files in Downloads","kind":"find_large_files","required":{"path":"~/Downloads"},"allowed":["limit"]}
+{"id":"health-check","nl":"run a system health check","kind":"check_system_health","required":{},"allowed":[]}
+{"id":"health-short","nl":"check system health","kind":"check_system_health","required":{},"allowed":[]}
+{"id":"logs-recent","nl":"show me recent logs","kind":"inspect_logs","required":{},"allowed":[]}
+{"id":"logs-short","nl":"show recent logs","kind":"inspect_logs","required":{},"allowed":[]}
+{"id":"open-notes","nl":"open /tmp/notes.txt","kind":"open_file_or_folder","required":{"path":"/tmp/notes.txt"},"allowed":[]}
+{"id":"open-home","nl":"open ~/Documents","kind":"open_file_or_folder","required":{"path":"~/Documents"},"allowed":[]}

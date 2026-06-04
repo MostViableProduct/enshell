@@ -123,13 +123,40 @@ impl<P: ModelProvider> Orchestrator<P> {
     /// Only after passing both checks is the typed [`Intent`] used for policy
     /// classification and adapter rendering.
     pub fn prepare(&self, user_request: &str) -> Result<Prepared, CoreError> {
-        // Step 0: deterministic fast path (§13). A known phrasing resolves to a
-        // **trusted, typed** intent with NO model call. It still flows through the
-        // same classify → MVP-gate → render → preview pipeline below; the only
-        // thing it skips is the untrusted-output validator (it produces no
-        // untrusted string). Tagged `IntentSource::FastPath` for the audit log.
+        match self.resolve(user_request)? {
+            Resolved::Clarify { question, options } => Ok(Prepared::Clarify { question, options }),
+            Resolved::Intent {
+                intent,
+                explanation,
+                source,
+            } => finish_prepare(intent, &explanation, user_request, source),
+        }
+    }
+
+    /// Resolve a natural-language request to a **typed intent** (or a request for
+    /// clarification), *before* policy classification, the MVP gate, or rendering.
+    ///
+    /// This is the first half of [`Self::prepare`], exposed on its own because it
+    /// is exactly the quantity an evaluation harness measures: "what intent did
+    /// the fast path / model produce for this request?" — independent of whether
+    /// that intent is executable in the current MVP. Keeping it as the single
+    /// source of truth means the eval measures the *real* resolution path, not a
+    /// reimplementation.
+    ///
+    /// ## Trust boundary (unchanged)
+    ///
+    /// The fast path yields a trusted, typed intent directly. The model path runs
+    /// its raw output through [`enshell_intents::parse_model_output`] (the strict
+    /// schema parse + domain validation) before returning a typed intent.
+    pub fn resolve(&self, user_request: &str) -> Result<Resolved, CoreError> {
+        // Step 0: deterministic fast path (§13) — a known phrasing resolves to a
+        // **trusted, typed** intent with NO model call.
         if let Some((intent, explanation)) = fast_path_match(user_request) {
-            return finish_prepare(intent, explanation, user_request, IntentSource::FastPath);
+            return Ok(Resolved::Intent {
+                intent,
+                explanation: explanation.to_owned(),
+                source: IntentSource::FastPath,
+            });
         }
 
         // Step 1: build the model request with privacy-minimal context.
@@ -147,18 +174,16 @@ impl<P: ModelProvider> Orchestrator<P> {
         // Step 3: validate the untrusted model output (the trust boundary).
         let action = parse_model_output(&raw).map_err(CoreError::InvalidIntent)?;
 
-        // Step 4: handle AskClarification — no further processing needed.
+        // Step 4: AskClarification surfaces as a clarification, not an intent.
         if let Intent::AskClarification { question, options } = action.intent {
-            return Ok(Prepared::Clarify { question, options });
+            return Ok(Resolved::Clarify { question, options });
         }
 
-        // Steps 5–7: classify, MVP-gate, render, preview (shared with the fast path).
-        finish_prepare(
-            action.intent,
-            &action.explanation,
-            user_request,
-            IntentSource::Model,
-        )
+        Ok(Resolved::Intent {
+            intent: action.intent,
+            explanation: action.explanation,
+            source: IntentSource::Model,
+        })
     }
 
     /// Phase 2: execute an [`Actionable`] **only** if confirmation satisfies the
@@ -306,6 +331,31 @@ fn finish_prepare(
         user_request: user_request.to_owned(),
         source,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Resolved — output of intent resolution (before policy/render)
+// ---------------------------------------------------------------------------
+
+/// The result of [`Orchestrator::resolve`]: the typed intent the fast path or
+/// model produced, or a request for clarification. This is the raw NL→intent
+/// outcome, *before* policy classification, the MVP gate, or rendering.
+#[derive(Debug, Clone)]
+pub enum Resolved {
+    /// A typed intent was resolved.
+    Intent {
+        /// The validated, typed intent.
+        intent: Intent,
+        /// The plain-English explanation (from the model, or the fast-path table).
+        explanation: String,
+        /// Whether the fast path or the model produced it.
+        source: IntentSource,
+    },
+    /// The model asked for clarification instead of choosing an intent.
+    Clarify {
+        question: String,
+        options: Option<Vec<String>>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,6 +1057,51 @@ mod tests {
             matches!(result, Err(CoreError::ConfirmationRequired)),
             "fast-path open with --yes must still require confirmation"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve() — NL → intent, before policy/render (used by the eval harness)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_fast_path_returns_intent_with_fastpath_source() {
+        let orch = orchestrator_with_stub();
+        match orch.resolve("what is using port 3000").expect("resolve ok") {
+            Resolved::Intent { intent, source, .. } => {
+                assert_eq!(source, IntentSource::FastPath);
+                assert!(matches!(
+                    intent,
+                    Intent::FindProcessUsingPort { port: 3000 }
+                ));
+            }
+            Resolved::Clarify { .. } => panic!("expected Intent, got Clarify"),
+        }
+    }
+
+    #[test]
+    fn resolve_unknown_request_returns_clarify() {
+        let orch = orchestrator_with_stub();
+        assert!(matches!(
+            orch.resolve("fizzbuzz wibble").expect("resolve ok"),
+            Resolved::Clarify { .. }
+        ));
+    }
+
+    #[test]
+    fn resolve_model_path_tags_model_source() {
+        // The fast path misses this phrasing (unknown prefix), so the stub model
+        // resolves it — the source must be Model, not FastPath.
+        let orch = orchestrator_with_stub();
+        match orch
+            .resolve("show me what is listening on port 22")
+            .expect("resolve ok")
+        {
+            Resolved::Intent { intent, source, .. } => {
+                assert_eq!(source, IntentSource::Model);
+                assert!(matches!(intent, Intent::FindProcessUsingPort { port: 22 }));
+            }
+            Resolved::Clarify { .. } => panic!("expected Intent, got Clarify"),
+        }
     }
 
     // -----------------------------------------------------------------------
