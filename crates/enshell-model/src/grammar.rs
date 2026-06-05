@@ -9,10 +9,13 @@
 //! catalog.
 //!
 //! It is **not** a substitute for validation. The grammar does not encode every
-//! JSON nuance (e.g. lone unicode surrogate escapes), nor per-intent parameter
-//! shapes — the `parameters` object is left general. [`enshell_intents::parse_model_output`]
-//! (the strict schema parse + domain checks) remains the authoritative validator
-//! after generation; constraining params per-intent is a clean future refinement.
+//! JSON nuance (e.g. lone unicode surrogate escapes), required parameters, or
+//! exact value domains. [`enshell_intents::parse_model_output`] (the strict schema
+//! parse + domain checks) remains the authoritative validator after generation.
+//! The grammar *does* constrain each intent's `parameters` object to that intent's
+//! declared keys with the right value type (see [`intent_grammar`]), so the model
+//! cannot spill a stray top-level field such as `confidence` into `parameters` —
+//! a real failure mode the per-intent coupling closes off at generation time.
 //!
 //! The intent-name alternatives are derived from [`crate::intent_tool_schema`], so
 //! the grammar and the schema the model is shown share a single source of truth
@@ -37,25 +40,93 @@ pub fn intent_names() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A GBNF grammar constraining decoding to a valid `ProposedAction` JSON object
-/// with `intent` restricted to the known intent names.
+/// A GBNF grammar constraining decoding to a valid `ProposedAction` JSON object.
+///
+/// The `intent` name and its `parameters` object are **coupled per intent**: each
+/// intent gets its own `<intent>-params` rule whose members are restricted to that
+/// intent's declared parameter keys (with the right value type). This prevents the
+/// model from nesting stray keys inside `parameters` — e.g. spilling the top-level
+/// `confidence` field into the params object, a real failure mode observed on the
+/// E2B model. Both the per-intent parameter shapes and the intent-name set are
+/// derived from [`crate::intent_tool_schema`], the single source of truth, so the
+/// grammar cannot drift from the schema the model is shown.
 ///
 /// Intended for `LlamaSampler::grammar(model, &intent_grammar(), "root")`.
 pub fn intent_grammar() -> String {
-    // Each name becomes the GBNF literal that matches the quoted JSON string,
-    // e.g. `find_large_files` -> `"\"find_large_files\""`.
-    let alternation = intent_names()
-        .iter()
-        .map(|n| format!("\"\\\"{n}\\\"\""))
-        .collect::<Vec<_>>()
-        .join(" | ");
-    GRAMMAR_TEMPLATE.replace("@INTENT_NAMES@", &alternation)
+    let schema = intent_tool_schema();
+    let intents = schema
+        .get("intents")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // `"\"<s>\""` — the GBNF literal matching the quoted JSON string `s`.
+    let lit = |s: &str| format!("\"\\\"{s}\\\"\"");
+
+    let mut actions: Vec<String> = Vec::new();
+    let mut param_rules: Vec<String> = Vec::new();
+
+    for intent in &intents {
+        let name = intent
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default();
+        // GBNF rule names accept `[a-zA-Z0-9-]` only — the real llama.cpp parser
+        // rejects underscores (found the hard way). Intent names use underscores,
+        // so the rule base swaps them for dashes; the JSON *literals* keep them.
+        let base = name.replace('_', "-");
+
+        // One `action` alternative couples this intent name with its own params
+        // rule and the shared trailer (risk / confirm / explanation / confidence).
+        actions.push(format!(
+            "( {name} ws \",\" ws {params} ws \":\" ws {base}-params ws \",\" ws trailer )",
+            name = lit(name),
+            params = lit("parameters"),
+        ));
+
+        match intent.get("parameters").and_then(|p| p.as_object()) {
+            Some(p) if !p.is_empty() => {
+                let members: Vec<String> = p
+                    .iter()
+                    .map(|(key, spec)| {
+                        let value_rule = match spec.get("type").and_then(|t| t.as_str()) {
+                            Some("integer" | "number") => "number",
+                            Some("boolean") => "boolean",
+                            Some("array") => "array",
+                            _ => "string",
+                        };
+                        format!("{} ws \":\" ws {value_rule}", lit(key))
+                    })
+                    .collect();
+                // Members may appear in any order; required-ness, duplicates and
+                // exact value domains are enforced downstream by `parse_model_output`.
+                // The point here is that ONLY these keys are admissible.
+                param_rules.push(format!("{base}-member ::= {}", members.join(" | ")));
+                param_rules.push(format!(
+                    "{base}-params ::= \"{{\" ws ( {base}-member ( \",\" ws {base}-member )* )? \"}}\" ws"
+                ));
+            }
+            _ => {
+                // No parameters: only the empty object is valid.
+                param_rules.push(format!("{base}-params ::= \"{{\" ws \"}}\" ws"));
+            }
+        }
+    }
+
+    let action_rule = format!("action ::= {}", actions.join(" | "));
+    let param_section = param_rules.join("\n");
+    format!("{ROOT_RULE}\n{action_rule}\n{param_section}\n{GRAMMAR_TAIL}")
 }
 
-// One rule per line. `risk-field` is optional because `ProposedAction::risk` is
-// `Option<RiskHint>` with `skip_serializing_if = "Option::is_none"` (omitted when
-// absent); it is left permissive (any string or null) since risk is advisory and
-// the policy engine re-derives the authoritative tier. The JSON building blocks
+// The grammar's fixed parts. `root` routes through the generated `action` rule,
+// which couples each intent name with its own `<intent>-params` shape (see
+// `intent_grammar`) so the params object cannot carry stray top-level keys.
+const ROOT_RULE: &str = r#"root ::= "{" ws "\"intent\"" ws ":" ws action ws "}" ws"#;
+
+// `trailer` is the shared tail every action ends with. `risk-field` is optional
+// because `ProposedAction::risk` is `Option<RiskHint>` (omitted when absent) and
+// is left permissive (any string or null) since risk is advisory and the policy
+// engine re-derives the authoritative tier. The JSON building blocks
 // (object/array/value/string/number) are the standard llama.cpp json grammar.
 //
 // `ws` is BOUNDED (`{0,16}`, not the usual unbounded `*`). `ws` appears between
@@ -68,9 +139,8 @@ pub fn intent_grammar() -> String {
 // whitespace and forces progress to the next structural token, guaranteeing the
 // object closes within the token budget. The few-shots emit compact JSON (zero
 // whitespace), so the bound never constrains well-formed output — only the loop.
-const GRAMMAR_TEMPLATE: &str = r#"root ::= "{" ws "\"intent\"" ws ":" ws intent-name ws "," ws "\"parameters\"" ws ":" ws object ws "," ws risk-field "\"requires_confirmation\"" ws ":" ws boolean ws "," ws "\"explanation\"" ws ":" ws string ws "," ws "\"confidence\"" ws ":" ws number ws "}" ws
+const GRAMMAR_TAIL: &str = r#"trailer ::= risk-field "\"requires_confirmation\"" ws ":" ws boolean ws "," ws "\"explanation\"" ws ":" ws string ws "," ws "\"confidence\"" ws ":" ws number ws
 risk-field ::= ( "\"risk\"" ws ":" ws ( string | "null" ) ws "," ws )?
-intent-name ::= @INTENT_NAMES@
 object ::= "{" ws ( member ( "," ws member )* )? "}" ws
 member ::= string ws ":" ws value
 array ::= "[" ws ( value ( "," ws value )* )? "]" ws
@@ -80,8 +150,7 @@ char ::= [^"\\\x7F\x00-\x1F] | "\\" ( ["\\/bfnrt] | "u" hex hex hex hex )
 hex ::= [0-9a-fA-F]
 number ::= "-"? ( "0" | [1-9] [0-9]* ) ( "." [0-9]+ )? ( ( "e" | "E" ) ( "-" | "+" )? [0-9]+ )? ws
 boolean ::= "true" | "false"
-ws ::= [ \t\n]{0,16}
-"#;
+ws ::= [ \t\n]{0,16}"#;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -188,6 +257,81 @@ mod tests {
         assert!(
             ws_rule.contains("{0,") && ws_rule.contains('}'),
             "ws must use a bounded repetition like `{{0,16}}`: {ws_rule}"
+        );
+    }
+
+    /// Every intent must get its own `<intent>-params` rule so the params object
+    /// is constrained per intent (the coupling that prevents stray-key nesting).
+    #[test]
+    fn every_intent_has_a_params_rule() {
+        let g = intent_grammar();
+        for name in intent_names() {
+            let base = name.replace('_', "-");
+            assert!(
+                g.contains(&format!("{base}-params ::=")),
+                "missing per-intent params rule for `{name}`"
+            );
+        }
+    }
+
+    /// The core of the per-intent fix: `parameters` admits ONLY that intent's
+    /// declared keys, so the model can no longer nest a top-level field (the
+    /// observed `confidence`-inside-`parameters` failure) into the params object.
+    #[test]
+    fn grammar_constrains_parameters_to_declared_keys_per_intent() {
+        let g = intent_grammar();
+
+        // inspect_logs: only source/since/filter — never confidence/explanation.
+        let inspect = g
+            .lines()
+            .find(|l| l.trim_start().starts_with("inspect-logs-member ::="))
+            .expect("inspect-logs-member rule present");
+        for ok in ["source", "since", "filter"] {
+            assert!(
+                inspect.contains(ok),
+                "inspect_logs must admit `{ok}`: {inspect}"
+            );
+        }
+        for forbidden in ["confidence", "explanation", "requires_confirmation"] {
+            assert!(
+                !inspect.contains(forbidden),
+                "inspect_logs params must NOT admit `{forbidden}` (the nesting bug): {inspect}"
+            );
+        }
+
+        // A parameterless intent admits ONLY the empty object.
+        let health = g
+            .lines()
+            .find(|l| l.trim_start().starts_with("check-system-health-params ::="))
+            .expect("check-system-health-params present");
+        assert_eq!(
+            health.trim(),
+            r#"check-system-health-params ::= "{" ws "}" ws"#,
+            "a no-param intent must admit only the empty object"
+        );
+
+        // Value types are honored: port -> number, force -> boolean, exclude -> array.
+        assert!(
+            g.contains(r#""\"port\"" ws ":" ws number"#),
+            "port must be typed as a number"
+        );
+        assert!(
+            g.contains(r#""\"force\"" ws ":" ws boolean"#),
+            "force must be typed as a boolean"
+        );
+        assert!(
+            g.contains(r#""\"exclude\"" ws ":" ws array"#),
+            "exclude must be typed as an array"
+        );
+
+        // `root` routes through the coupled `action` rule, not a bare generic object.
+        let root = g
+            .lines()
+            .find(|l| l.trim_start().starts_with("root ::="))
+            .expect("root present");
+        assert!(
+            root.contains(" action "),
+            "root must route through the per-intent `action` rule: {root}"
         );
     }
 
