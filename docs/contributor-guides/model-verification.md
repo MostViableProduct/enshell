@@ -139,14 +139,35 @@ the fast path.
 | `logs-recent` | added `filter = ""` | blank optional |
 | `logs-short` | added `filter = ""` | blank optional |
 
-**Follow-up (this commit):** trusted parser cleanups in `enshell-intents` —
-blank/whitespace-only optionals collapse to `None` (targets `logs-recent`/`logs-short`)
-and the deictic `here`/`this folder`/`current directory` → `.` for `find_large_files.path`
-(targets `large-here-*`). These are post-generation transforms, so they do not perturb
-the model's other outputs. `large-downloads` (a real extra `min_size`) and
-`large-downloads-model` (a *context-dependent* `Downloads` → `~/Downloads` rewrite,
-deliberately deferred) remain open. **A fresh measurement is pending** — re-run the
-command above and append a new row rather than editing this one.
+**Follow-up:** trusted parser cleanups in `enshell-intents` —
+blank/whitespace-only optionals collapse to `None` and the deictic `here`/`this
+folder`/`current directory` → `.` for `find_large_files.path`. These are
+post-generation transforms, so they do not perturb the model's other outputs.
+
+#### Recorded result — after parser cleanups (2026-06-05, Metal)
+
+Confirming run at commit `68295a6`, back on the **Metal** reference machine (Apple
+M1 Pro, 16 GB) — directly comparable to the 14/19 baseline above (the 13/19 row was
+the slower CPU droplet; backend FP differences mean per-case results are only
+comparable within the same backend).
+
+| Result | **16/19 (84.2%)** raw intent accuracy — best measured; +2 vs the 14/19 Metal baseline |
+|---|---|
+
+| Case | Failure | Bucket |
+|---|---|---|
+| `large-downloads-model` | path `"Downloads"` vs `"~/Downloads"` | path (context-dependent; **deferred**) |
+| `logs-recent` | added `since = "1h"` | extra param (semantically plausible) |
+| `logs-short` | added `since = "1h"` | extra param (semantically plausible) |
+
+`large-here-largest`/`large-here-biggest` are now **fixed** (deictic `here` → `.`,
+confirmed end to end). The logs cases keep *moving* their stray param
+(`source="system"` → `filter=""` → now `since="1h"`); `since="1h"` is a reasonable
+reading of "recent logs" = "logs from the last hour", so the remaining gap is the
+**open product decision** (model-verification §Extending): accept `since` as valid
+for these fixtures, add request-context repair, or steer the model to omit it. The
+`Downloads` → `~/Downloads` case is the deliberately-deferred context-dependent
+rewrite.
 
 ### 2. Smoke-test the end-to-end CLI
 
