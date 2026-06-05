@@ -508,9 +508,48 @@ struct AskClarificationParams {
     options: Option<Vec<String>>,
 }
 
+/// Normalize an optional string parameter: trim surrounding whitespace and treat
+/// an empty (or whitespace-only) value as **absent**.
+///
+/// Small models sometimes emit `""` for an optional they "considered" but had no
+/// value for (e.g. an empty `filter` on a plain recent-logs request). A blank
+/// optional is meaningless, and collapsing it to `None` keeps it from being
+/// treated as a surprise parameter downstream. This is a **context-free** cleanup:
+/// it never invents or rewrites a real value — it only drops whitespace and empties.
+fn blank_to_none(value: Option<String>) -> Option<String> {
+    value.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+}
+
+/// Canonicalize the unambiguous deictic spellings of "the current directory" to
+/// `"."`.
+///
+/// `here`, `this folder`, `current directory`, … always denote the working
+/// directory regardless of the request text or the cwd, so this is **context-free**
+/// and safe to apply at parse time. Context-*dependent* rewrites — e.g. a bare
+/// `Downloads` → `~/Downloads`, which is wrong when a real `./Downloads` exists —
+/// are deliberately NOT done here: they need the original natural-language request
+/// and the cwd, and belong in a future post-resolve repair layer.
+fn normalize_deictic_path(path: String) -> String {
+    match path.trim().to_ascii_lowercase().as_str() {
+        "here"
+        | "this folder"
+        | "this directory"
+        | "current folder"
+        | "current directory"
+        | "current dir"
+        | "the current folder"
+        | "the current directory" => ".".to_owned(),
+        _ => path,
+    }
+}
+
 /// Build a typed `Intent` from an intent name string and a `serde_json::Value`
 /// representing the parameters object. Each variant's parameters are deserialized
 /// with `deny_unknown_fields` enforced via the per-variant param structs above.
+///
+/// Optional string parameters are run through [`blank_to_none`] so a blank value
+/// from the model is treated as absent; `find_large_files.path` is additionally
+/// passed through [`normalize_deictic_path`] (context-free `here` → `.`).
 fn build_intent_strict(intent_name: &str, params: Value) -> Result<Intent, IntentError> {
     macro_rules! parse_params {
         ($T:ty) => {
@@ -522,8 +561,8 @@ fn build_intent_strict(intent_name: &str, params: Value) -> Result<Intent, Inten
         "find_large_files" => {
             let p: FindLargeFilesParams = parse_params!(FindLargeFilesParams)?;
             Ok(Intent::FindLargeFiles {
-                path: p.path,
-                min_size: p.min_size,
+                path: normalize_deictic_path(p.path),
+                min_size: blank_to_none(p.min_size),
                 limit: p.limit,
             })
         }
@@ -535,7 +574,7 @@ fn build_intent_strict(intent_name: &str, params: Value) -> Result<Intent, Inten
             let p: KillProcessParams = parse_params!(KillProcessParams)?;
             Ok(Intent::KillProcess {
                 pid: p.pid,
-                name: p.name,
+                name: blank_to_none(p.name),
                 port: p.port,
                 force: p.force,
             })
@@ -544,8 +583,8 @@ fn build_intent_strict(intent_name: &str, params: Value) -> Result<Intent, Inten
             let p: InstallPackageParams = parse_params!(InstallPackageParams)?;
             Ok(Intent::InstallPackage {
                 name: p.name,
-                manager: p.manager,
-                version: p.version,
+                manager: blank_to_none(p.manager),
+                version: blank_to_none(p.version),
             })
         }
         "start_service" => {
@@ -564,7 +603,7 @@ fn build_intent_strict(intent_name: &str, params: Value) -> Result<Intent, Inten
             let p: CompressFolderParams = parse_params!(CompressFolderParams)?;
             Ok(Intent::CompressFolder {
                 path: p.path,
-                output: p.output,
+                output: blank_to_none(p.output),
                 exclude: p.exclude,
             })
         }
@@ -572,14 +611,14 @@ fn build_intent_strict(intent_name: &str, params: Value) -> Result<Intent, Inten
             let p: CreateBackupParams = parse_params!(CreateBackupParams)?;
             Ok(Intent::CreateBackup {
                 path: p.path,
-                dest: p.dest,
+                dest: blank_to_none(p.dest),
             })
         }
         "explain_error" => {
             let p: ExplainErrorParams = parse_params!(ExplainErrorParams)?;
             Ok(Intent::ExplainError {
-                command: p.command,
-                stderr: p.stderr,
+                command: blank_to_none(p.command),
+                stderr: blank_to_none(p.stderr),
                 exit_code: p.exit_code,
             })
         }
@@ -594,8 +633,8 @@ fn build_intent_strict(intent_name: &str, params: Value) -> Result<Intent, Inten
         "update_packages" => {
             let p: UpdatePackagesParams = parse_params!(UpdatePackagesParams)?;
             Ok(Intent::UpdatePackages {
-                manager: p.manager,
-                scope: p.scope,
+                manager: blank_to_none(p.manager),
+                scope: blank_to_none(p.scope),
             })
         }
         "check_system_health" => {
@@ -605,9 +644,9 @@ fn build_intent_strict(intent_name: &str, params: Value) -> Result<Intent, Inten
         "inspect_logs" => {
             let p: InspectLogsParams = parse_params!(InspectLogsParams)?;
             Ok(Intent::InspectLogs {
-                source: p.source,
-                since: p.since,
-                filter: p.filter,
+                source: blank_to_none(p.source),
+                since: blank_to_none(p.since),
+                filter: blank_to_none(p.filter),
             })
         }
         "list_processes" => {
@@ -635,7 +674,7 @@ fn build_intent_strict(intent_name: &str, params: Value) -> Result<Intent, Inten
             Ok(Intent::CreateProject {
                 kind: p.kind,
                 name: p.name,
-                path: p.path,
+                path: blank_to_none(p.path),
             })
         }
         "git_commit_changes" => {
@@ -1373,6 +1412,102 @@ mod tests {
         let action =
             parse_model_output_unchecked(json).expect("unchecked should allow confidence > 1");
         assert!((action.confidence - 9.9).abs() < 1e-4);
+    }
+
+    // ------------------------------------------------------------------
+    // Trusted parser cleanups: blank optionals -> None, deictic path -> "."
+    // ------------------------------------------------------------------
+
+    /// A blank (empty / whitespace-only) optional string normalizes to `None`, so
+    /// it is not treated as a surprise parameter downstream (e.g. an empty `filter`
+    /// the model tacks onto a plain recent-logs request).
+    #[test]
+    fn blank_optional_strings_collapse_to_none() {
+        let json = r#"{
+            "intent": "inspect_logs",
+            "parameters": { "source": "", "since": "   ", "filter": "" },
+            "explanation": "recent logs",
+            "confidence": 0.9
+        }"#;
+        let action = parse_model_output(json).expect("blank optionals parse");
+        assert_eq!(
+            action.intent,
+            Intent::InspectLogs {
+                source: None,
+                since: None,
+                filter: None
+            }
+        );
+    }
+
+    /// A non-blank optional keeps its value, trimmed of surrounding whitespace.
+    #[test]
+    fn nonblank_optional_is_trimmed_and_kept() {
+        let json = r#"{
+            "intent": "inspect_logs",
+            "parameters": { "filter": "  error  " },
+            "explanation": "errors",
+            "confidence": 0.9
+        }"#;
+        let action = parse_model_output(json).expect("filter parses");
+        assert_eq!(
+            action.intent,
+            Intent::InspectLogs {
+                source: None,
+                since: None,
+                filter: Some("error".to_owned())
+            }
+        );
+    }
+
+    /// Deictic spellings of the current directory normalize to ".", case-insensitively.
+    #[test]
+    fn deictic_find_large_files_path_normalizes_to_dot() {
+        for spelling in [
+            "here",
+            "Here",
+            "this folder",
+            "current directory",
+            "  current dir  ",
+        ] {
+            let json = format!(
+                r#"{{"intent":"find_large_files","parameters":{{"path":"{spelling}"}},"explanation":"x","confidence":0.9}}"#
+            );
+            let action =
+                parse_model_output(&json).unwrap_or_else(|e| panic!("`{spelling}` parses: {e}"));
+            assert_eq!(
+                action.intent,
+                Intent::FindLargeFiles {
+                    path: ".".to_owned(),
+                    min_size: None,
+                    limit: None
+                },
+                "`{spelling}` must normalize to \".\""
+            );
+        }
+    }
+
+    /// Real paths are left untouched — and a bare `Downloads` is deliberately NOT
+    /// rewritten to `~/Downloads` here (that context-dependent repair is deferred
+    /// to a future layer that can see the request and cwd).
+    #[test]
+    fn real_find_large_files_paths_are_not_rewritten() {
+        for path in ["/var/log", "~/Downloads", "Downloads", "./build"] {
+            let json = format!(
+                r#"{{"intent":"find_large_files","parameters":{{"path":"{path}"}},"explanation":"x","confidence":0.9}}"#
+            );
+            let action =
+                parse_model_output(&json).unwrap_or_else(|e| panic!("`{path}` parses: {e}"));
+            assert_eq!(
+                action.intent,
+                Intent::FindLargeFiles {
+                    path: path.to_owned(),
+                    min_size: None,
+                    limit: None
+                },
+                "`{path}` must be left unchanged"
+            );
+        }
     }
 
     // ------------------------------------------------------------------

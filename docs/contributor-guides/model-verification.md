@@ -84,10 +84,11 @@ per-case failures and overall accuracy. `--threshold` defaults to **100** (exit
 non-zero below that); pass `--threshold 0` to just measure, or `--threshold <N>` to
 gate at N%.
 
-#### Recorded result — Gemma 4 E2B (2026-06-04)
+#### Recorded result — Gemma 4 E2B (2026-06-04, baseline, pre-robustness-fixes)
 
-First end-to-end verification of the real-model path. Greedy + GBNF-constrained
-decoding is deterministic, so this reproduces exactly against the pinned file.
+First end-to-end verification of the real-model path, **before** the inspect_logs /
+grammar / parser-normalization changes below. Greedy + GBNF-constrained decoding is
+deterministic, so this reproduces exactly against the pinned file *at that commit*.
 
 | Field | Value |
 |---|---|
@@ -111,6 +112,41 @@ model is reached, so everyday accuracy is higher than this isolated number:
 These point at prompt / few-shot tuning. (The adapter already rejects the `source`
 param the model adds — see the `inspect_logs` fidelity note in `enshell-adapters`.)
 Raising this toward a pass threshold is the accuracy-tuning step.
+
+#### Recorded result — cumulative after the robustness fixes (2026-06-05)
+
+Re-measured at commit `4ba499e` after four end-to-end robustness fixes (inspect_logs
+source steering + `source="system"` backstop; bounded-`ws` grammar; per-intent
+`parameters` grammar; inspect_logs `filter`/`source` rendering). Same command/model;
+hardware was a 4-vCPU/8 GB CPU droplet (no Metal — ~2.4 min/case, ~45 min total).
+
+| Result | **13/19 (68.4%)** raw intent accuracy (model in isolation, fast path bypassed) |
+|---|---|
+
+The number **dipped from 14/19** even though robustness improved markedly. This is
+expected and worth understanding: the fixes closed failure modes the fixtures never
+exercise (truncated JSON, stray-key nesting, rejected `filter`/`source` paraphrases),
+while the grammar restructuring perturbs greedy decoding, shifting unrelated cases.
+The eval is a deliberately harsh isolated metric; everyday accuracy is buffered by
+the fast path.
+
+| Case | Failure | Bucket |
+|---|---|---|
+| `large-here-largest` | path `"here"` vs expected `"."` | path (deictic) |
+| `large-here-biggest` | path `"here"` vs expected `"."` | path (deictic) |
+| `large-downloads` | added `min_size = "100M"` | extra param |
+| `large-downloads-model` | path `"Downloads"` vs `"~/Downloads"` | path (context-dependent) |
+| `logs-recent` | added `filter = ""` | blank optional |
+| `logs-short` | added `filter = ""` | blank optional |
+
+**Follow-up (this commit):** trusted parser cleanups in `enshell-intents` —
+blank/whitespace-only optionals collapse to `None` (targets `logs-recent`/`logs-short`)
+and the deictic `here`/`this folder`/`current directory` → `.` for `find_large_files.path`
+(targets `large-here-*`). These are post-generation transforms, so they do not perturb
+the model's other outputs. `large-downloads` (a real extra `min_size`) and
+`large-downloads-model` (a *context-dependent* `Downloads` → `~/Downloads` rewrite,
+deliberately deferred) remain open. **A fresh measurement is pending** — re-run the
+command above and append a new row rather than editing this one.
 
 ### 2. Smoke-test the end-to-end CLI
 
