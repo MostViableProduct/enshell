@@ -13,7 +13,7 @@
 //! | [`FindProcessUsingPort`] | `lsof -i :<port>` | `ss -lptn 'sport = :<port>'` | — (deferred) |
 //! | [`FindLargeFiles`] | `du -ah <path> \| sort -rh \| head -n <limit>` | same | — (deferred) |
 //! | [`OpenFileOrFolder`] | `open <path>` | `xdg-open <path>` | — (deferred) |
-//! | [`InspectLogs`] | `log show --style syslog --last <since>` | `journalctl --no-pager -n 200 [--since <since>]` | `wevtutil qe System /c:200 /rd:true /f:text` |
+//! | [`InspectLogs`] | `log show --style syslog --last <since> [--predicate …]` (+ `\| grep <filter>`) | `journalctl --no-pager -n 200 [-u <src>] [--since <since>]` (+ `\| grep <filter>`) | `wevtutil qe System /c:200 /rd:true /f:text` |
 //! | [`CheckSystemHealth`] | `df -h; uptime; vm_stat` (Sequence) | `df -h; uptime; free -h` (Sequence) | `systeminfo` |
 //! | [`ListProcesses`] | `ps aux` | `ps aux` | `tasklist` |
 //! | [`DiskUsage`] | `df -h` | `df -h` | — (deferred) |
@@ -27,17 +27,19 @@
 //!   `du` enumerates all files and the caller chooses with `head`.  Document
 //!   this as a known limitation; a future slice can add `find … -size +<n>`
 //!   pre-filtering.
-//! - `source` on [`InspectLogs`] is honored only for the value **`"system"`**
-//!   (case-insensitive) — a synonym for the default system log this adapter
-//!   already reads, so it renders identically to the unqualified request. Any
-//!   *other* `source` (a specific service/app log such as `nginx`), and the
-//!   `filter` parameter, are **not yet implemented on any OS**, and `since` is
-//!   not yet implemented on Windows. Those unsupported parameters are **rejected
-//!   with [`AdapterError::InvalidParameter`] when present** (a future slice will
-//!   add `--predicate` / grep post-filtering and a Windows XPath time query) —
-//!   the adapter refuses rather than silently render a query broader than the
-//!   request. The unqualified "recent logs" request renders on all three OSes;
-//!   `since` additionally renders on macOS/Linux.
+//! - [`InspectLogs`] parameters, by OS:
+//!   - `source = "system"` (case-insensitive) or omitted → the default system log
+//!     (macOS `log show`, Linux `journalctl`, Windows `System` channel).
+//!   - A **specific** `source` (a service/app name) → macOS `log show --predicate
+//!     'process == "<src>"'`, Linux `journalctl -u <src>`; **deferred on Windows**.
+//!     The source must be a simple identifier (`[A-Za-z0-9._-]`) — other values are
+//!     rejected so a predicate metacharacter cannot broaden the match.
+//!   - `filter` → a no-shell `grep -e <pattern>` post-filter (a `Pipeline`) on
+//!     macOS/Linux; **deferred on Windows**.
+//!   - `since` → macOS `--last`, Linux `--since`; **deferred on Windows** (needs an
+//!     XPath time query).
+//!   - Any deferred parameter is **rejected with [`AdapterError::InvalidParameter`]**
+//!     rather than silently rendering a query broader than the request.
 //! - Write/system intents (`InstallPackage`, `KillProcess`, `CompressFolder`,
 //!   `CreateBackup`, `CreateProject`, `GitCommitChanges`, `StartService`,
 //!   `StopService`, `UpdatePackages`) → [`AdapterError::NotYetImplemented`].
@@ -523,66 +525,76 @@ fn render_inspect_logs(
     os: Os,
 ) -> Result<CommandPlan, AdapterError> {
     // Fidelity invariant: the rendered command must honor every parameter the
-    // intent specifies, or the adapter must refuse — it must NEVER silently
-    // render a *broader* query than asked (enShell never quietly does less than
-    // requested).
+    // intent specifies, or the adapter must refuse — it must NEVER silently render
+    // a *broader* query than asked (enShell never quietly does less than asked).
     //
-    // The one `source` we can honor faithfully is "system": on every supported
-    // OS the default log this adapter already queries IS the system log (macOS
-    // unified `log show`, Linux `journalctl`, the Windows `System` channel), so
-    // `source = "system"` names exactly what we render by default — accept it as
-    // a synonym for the unqualified request (identical rendering, never broader).
-    // Any *other* source (a specific service/app log such as "nginx") is not yet
-    // encodable, so a request that carries it is rejected loudly rather than run
-    // against a different log than asked.
-    if let Some(src) = source {
-        if !src.trim().eq_ignore_ascii_case("system") {
-            return Err(AdapterError::InvalidParameter {
-                intent: "inspect_logs",
-                reason: "only the \"system\" log `source` is supported yet — it names the \
-                         default system log this command already reads; a specific source \
-                         such as \"nginx\" is not encodable, so omit it rather than have \
-                         enShell silently read a different/broader log than requested",
-            });
+    // Classify `source`. Absent, or "system" (case-insensitive), means the default
+    // system log — exactly what the unqualified per-OS command already reads (macOS
+    // unified `log show`, Linux `journalctl`, the Windows `System` channel). Any
+    // other value names a *specific* service/app log. A specific source is
+    // interpolated into a `journalctl -u` unit name / a `log show` predicate, so it
+    // must be a simple identifier: reject anything outside [A-Za-z0-9._-] so a
+    // predicate metacharacter cannot broaden the match (no injection surface either,
+    // though execution is already shell-free).
+    let specific_source: Option<&str> = match source.map(str::trim) {
+        None => None,
+        Some(s) if s.eq_ignore_ascii_case("system") => None,
+        Some(s) => {
+            let valid = !s.is_empty()
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+            if !valid {
+                return Err(AdapterError::InvalidParameter {
+                    intent: "inspect_logs",
+                    reason: "log `source` must be a simple service/process name \
+                             ([A-Za-z0-9._-]); use \"system\" (or omit it) for the system log",
+                });
+            }
+            Some(s)
         }
-        // `source = "system"` is the default system log: fall through and render
-        // the unqualified system-log query, exactly as if `source` were omitted.
-    }
-    if filter.is_some() {
-        return Err(AdapterError::InvalidParameter {
-            intent: "inspect_logs",
-            reason: "text/pattern `filter`ing of logs is not supported yet; omit it to show \
-                     recent unfiltered logs (otherwise enShell would silently show more than \
-                     requested)",
-        });
-    }
-    match os {
+    };
+
+    // Build the per-OS base query honoring `source` + `since`. `filter` is applied
+    // afterwards as a `grep` post-filter (a no-shell Pipeline). On Windows, time /
+    // source / text filtering are all deferred (no clean argv form yet) and refused
+    // rather than run a broader query than asked.
+    let base: ExecStep = match os {
         Os::MacOs => {
-            // log show --style syslog --last <since|"1h">
+            // log show --style syslog --last <since|"1h"> [--predicate 'process == "<src>"']
             let since_val = since.unwrap_or("1h");
-            Ok(CommandPlan::exec(
-                "log",
-                ["show", "--style", "syslog", "--last", since_val],
-            ))
+            let mut args: Vec<String> = vec![
+                "show".to_owned(),
+                "--style".to_owned(),
+                "syslog".to_owned(),
+                "--last".to_owned(),
+                since_val.to_owned(),
+            ];
+            if let Some(src) = specific_source {
+                args.push("--predicate".to_owned());
+                args.push(format!("process == \"{src}\""));
+            }
+            ExecStep::new("log", args)
         }
         Os::Linux => {
-            // journalctl --no-pager -n 200 [--since <since>]
+            // journalctl --no-pager -n 200 [-u <src>] [--since <since>]
             let mut args: Vec<String> =
                 vec!["--no-pager".to_owned(), "-n".to_owned(), "200".to_owned()];
+            if let Some(src) = specific_source {
+                args.push("-u".to_owned());
+                args.push(src.to_owned());
+            }
             if let Some(s) = since {
                 args.push("--since".to_owned());
                 args.push(s.to_owned());
             }
-            Ok(CommandPlan::Exec(ExecStep {
-                program: "journalctl".to_owned(),
-                args,
-            }))
+            ExecStep::new("journalctl", args)
         }
         Os::Windows => {
-            // `since` (time filtering) is not yet encodable on Windows — it would
-            // need a verbose XPath time query. Refuse when it is present rather
-            // than run `wevtutil` unfiltered, which would return a broader window
-            // than asked. The unqualified request still renders below.
+            // Windows defers time/source/text filtering: `since` needs a verbose
+            // XPath time query, a specific `source` needs a non-default channel
+            // mapping, and `filter` needs a different post-filter. Refuse each
+            // rather than run `wevtutil` broader than asked; the unqualified
+            // System-log request (or source = "system") still renders below.
             if since.is_some() {
                 return Err(AdapterError::InvalidParameter {
                     intent: "inspect_logs",
@@ -591,18 +603,44 @@ fn render_inspect_logs(
                              would silently show a broader time window than requested)",
                 });
             }
-            // wevtutil qe System /c:200 /rd:true /f:text
-            // `qe` (query-events) is read-only; /rd:true = newest first; /c:200 =
-            // cap at 200 events; /f:text = plain text.
-            Ok(CommandPlan::exec(
+            if specific_source.is_some() {
+                return Err(AdapterError::InvalidParameter {
+                    intent: "inspect_logs",
+                    reason: "selecting a specific log `source` is not supported yet on Windows; \
+                             use \"system\" (or omit it) to read the System event log",
+                });
+            }
+            if filter.is_some() {
+                return Err(AdapterError::InvalidParameter {
+                    intent: "inspect_logs",
+                    reason: "text/pattern `filter`ing is not supported yet on Windows; omit it \
+                             to show recent unfiltered System-log events (otherwise enShell \
+                             would silently show more than requested)",
+                });
+            }
+            // wevtutil qe System /c:200 /rd:true /f:text  (read-only; newest first)
+            return Ok(CommandPlan::exec(
                 "wevtutil",
                 ["qe", "System", "/c:200", "/rd:true", "/f:text"],
-            ))
+            ));
         }
-        Os::Other => Err(AdapterError::UnsupportedOs {
-            intent: "inspect_logs",
-            os,
-        }),
+        Os::Other => {
+            return Err(AdapterError::UnsupportedOs {
+                intent: "inspect_logs",
+                os,
+            });
+        }
+    };
+
+    // macOS/Linux: a text `filter` becomes a no-shell `grep` post-filter — a
+    // Pipeline of argv steps wired with OS pipes, never `sh -c`. `grep -e <pattern>`
+    // keeps a pattern that begins with `-` from being read as a flag.
+    match filter {
+        Some(f) => Ok(CommandPlan::pipeline(vec![
+            base,
+            ExecStep::new("grep", ["-e", f]),
+        ])),
+        None => Ok(CommandPlan::Exec(base)),
     }
 }
 
@@ -1253,42 +1291,153 @@ mod tests {
         assert_eq!(step.args, vec!["--no-pager", "-n", "200", "--since", "30m"]);
     }
 
-    /// A *specific* (non-"system") `source` and any `filter` are unimplemented on
-    /// every OS, so a request carrying either is rejected uniformly — never
-    /// silently dropped to a broader query. (`source = "system"` is the one
-    /// accepted value; see `inspect_logs_accepts_system_source_as_default`.)
+    /// A *specific* (non-"system") `source` renders the per-OS service-log query:
+    /// `journalctl -u <src>` on Linux, a `log show --predicate` on macOS.
     #[test]
-    fn inspect_logs_rejects_source_and_filter_on_all_supported_os() {
+    fn inspect_logs_renders_specific_source_on_mac_and_linux() {
+        let linux = render(
+            &Intent::InspectLogs {
+                source: Some("nginx".to_owned()),
+                since: None,
+                filter: None,
+            },
+            Os::Linux,
+        )
+        .expect("specific source renders on Linux");
+        let step = as_exec(&linux);
+        assert_eq!(step.program, "journalctl");
+        assert_eq!(step.args, vec!["--no-pager", "-n", "200", "-u", "nginx"]);
+
+        let mac = render(
+            &Intent::InspectLogs {
+                source: Some("nginx".to_owned()),
+                since: None,
+                filter: None,
+            },
+            Os::MacOs,
+        )
+        .expect("specific source renders on macOS");
+        let step = as_exec(&mac);
+        assert_eq!(step.program, "log");
+        assert!(step.args.iter().any(|a| a == "--predicate"));
+        assert!(
+            step.args.iter().any(|a| a == "process == \"nginx\""),
+            "macOS source must become a process predicate: {:?}",
+            step.args
+        );
+    }
+
+    /// `filter` becomes a no-shell `grep -e <pattern>` post-filter Pipeline on
+    /// macOS/Linux, and `source` + `since` + `filter` compose in one plan.
+    #[test]
+    fn inspect_logs_renders_filter_as_grep_pipeline_and_composes() {
+        // Linux, all three parameters at once.
+        let plan = render(
+            &Intent::InspectLogs {
+                source: Some("nginx".to_owned()),
+                since: Some("1h".to_owned()),
+                filter: Some("error".to_owned()),
+            },
+            Os::Linux,
+        )
+        .expect("source+since+filter compose on Linux");
+        let steps = as_pipeline(&plan);
+        assert_eq!(steps.len(), 2, "filter must add exactly one grep stage");
+        assert_eq!(steps[0].program, "journalctl");
+        assert_eq!(
+            steps[0].args,
+            vec!["--no-pager", "-n", "200", "-u", "nginx", "--since", "1h"]
+        );
+        assert_eq!(steps[1].program, "grep");
+        assert_eq!(steps[1].args, vec!["-e", "error"]);
+
+        // macOS filter on the default log.
+        let mac = render(
+            &Intent::InspectLogs {
+                source: None,
+                since: None,
+                filter: Some("panic".to_owned()),
+            },
+            Os::MacOs,
+        )
+        .expect("filter renders on macOS");
+        let steps = as_pipeline(&mac);
+        assert_eq!(steps[0].program, "log");
+        assert_eq!(steps[1].program, "grep");
+        assert_eq!(steps[1].args, vec!["-e", "panic"]);
+    }
+
+    /// The `grep` post-filter is wired with OS pipes, never a shell — a filtered
+    /// log plan must still report no shell interpreter.
+    #[test]
+    fn inspect_logs_filter_pipeline_is_read_only_no_shell() {
+        for os in [Os::MacOs, Os::Linux] {
+            let plan = render(
+                &Intent::InspectLogs {
+                    source: None,
+                    since: None,
+                    filter: Some("oops".to_owned()),
+                },
+                os,
+            )
+            .expect("filtered logs render");
+            assert!(
+                !plan_requires_shell(&plan),
+                "filtered logs must stay shell-free on {os:?}"
+            );
+        }
+    }
+
+    /// A `source` with characters outside `[A-Za-z0-9._-]` is rejected on every OS:
+    /// it is interpolated into a predicate / unit name, so a metacharacter could
+    /// otherwise broaden the query past what was asked.
+    #[test]
+    fn inspect_logs_rejects_unsafe_source() {
         for os in [Os::MacOs, Os::Linux, Os::Windows] {
-            let with_source = Intent::InspectLogs {
-                source: Some("Application".to_owned()),
+            let bad = Intent::InspectLogs {
+                source: Some("nginx\" OR 1==1".to_owned()),
                 since: None,
                 filter: None,
             };
             assert!(
                 matches!(
-                    render(&with_source, os),
+                    render(&bad, os),
                     Err(AdapterError::InvalidParameter {
                         intent: "inspect_logs",
                         ..
                     })
                 ),
-                "source must be rejected on {os:?}"
+                "an unsafe source must be rejected on {os:?}"
             );
-            let with_filter = Intent::InspectLogs {
+        }
+    }
+
+    /// Windows defers a specific `source` and any `filter` (no clean argv form yet),
+    /// refusing rather than running a broader query. (`since` deferral is covered by
+    /// `inspect_logs_windows_rejects_since_rather_than_widening`.)
+    #[test]
+    fn inspect_logs_windows_defers_source_and_filter() {
+        for bad in [
+            Intent::InspectLogs {
+                source: Some("nginx".to_owned()),
+                since: None,
+                filter: None,
+            },
+            Intent::InspectLogs {
                 source: None,
                 since: None,
                 filter: Some("error".to_owned()),
-            };
+            },
+        ] {
             assert!(
                 matches!(
-                    render(&with_filter, os),
+                    render(&bad, Os::Windows),
                     Err(AdapterError::InvalidParameter {
                         intent: "inspect_logs",
                         ..
                     })
                 ),
-                "filter must be rejected on {os:?}"
+                "Windows must defer source/filter: {bad:?}"
             );
         }
     }
