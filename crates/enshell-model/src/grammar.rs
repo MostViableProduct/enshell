@@ -57,6 +57,17 @@ pub fn intent_grammar() -> String {
 // absent); it is left permissive (any string or null) since risk is advisory and
 // the policy engine re-derives the authoritative tier. The JSON building blocks
 // (object/array/value/string/number) are the standard llama.cpp json grammar.
+//
+// `ws` is BOUNDED (`{0,16}`, not the usual unbounded `*`). `ws` appears between
+// every token and is the only rule that admits raw newlines (`char` excludes
+// U+0000..=U+001F), so an unbounded `ws` lets greedy decoding fall into a
+// newline-repetition loop in a whitespace slot: every `\n` stays grammar-valid,
+// the object never closes, and generation runs to MAX_GENERATED_TOKENS, yielding
+// truncated JSON ("EOF while parsing an object at line N"). Found the hard way on
+// a real model (greedy, no repetition penalty); the bound caps consecutive
+// whitespace and forces progress to the next structural token, guaranteeing the
+// object closes within the token budget. The few-shots emit compact JSON (zero
+// whitespace), so the bound never constrains well-formed output — only the loop.
 const GRAMMAR_TEMPLATE: &str = r#"root ::= "{" ws "\"intent\"" ws ":" ws intent-name ws "," ws "\"parameters\"" ws ":" ws object ws "," ws risk-field "\"requires_confirmation\"" ws ":" ws boolean ws "," ws "\"explanation\"" ws ":" ws string ws "," ws "\"confidence\"" ws ":" ws number ws "}" ws
 risk-field ::= ( "\"risk\"" ws ":" ws ( string | "null" ) ws "," ws )?
 intent-name ::= @INTENT_NAMES@
@@ -69,7 +80,7 @@ char ::= [^"\\\x7F\x00-\x1F] | "\\" ( ["\\/bfnrt] | "u" hex hex hex hex )
 hex ::= [0-9a-fA-F]
 number ::= "-"? ( "0" | [1-9] [0-9]* ) ( "." [0-9]+ )? ( ( "e" | "E" ) ( "-" | "+" )? [0-9]+ )? ws
 boolean ::= "true" | "false"
-ws ::= [ \t\n]*
+ws ::= [ \t\n]{0,16}
 "#;
 
 // ---------------------------------------------------------------------------
@@ -155,6 +166,28 @@ mod tests {
         assert!(
             !char_rule.contains(r#"[^"\\]"#),
             "char rule must not use the control-char-permitting [^\"\\\\] class: {char_rule}"
+        );
+    }
+
+    /// `ws` must be BOUNDED, not the unbounded `*`. `ws` is the only rule that
+    /// admits raw newlines, so an unbounded `ws ::= [ \t\n]*` lets greedy decoding
+    /// loop on newlines in a whitespace slot until the token cap, truncating the
+    /// object (observed on a real model as "EOF while parsing an object at line
+    /// N"). The bound guarantees the object closes within the token budget.
+    #[test]
+    fn grammar_ws_is_bounded_to_prevent_whitespace_loops() {
+        let g = intent_grammar();
+        let ws_rule = g
+            .lines()
+            .find(|l| l.trim_start().starts_with("ws ::="))
+            .expect("ws rule present");
+        assert!(
+            !ws_rule.trim_end().ends_with('*'),
+            "ws must not be unbounded (`*`) — that permits a newline decode loop: {ws_rule}"
+        );
+        assert!(
+            ws_rule.contains("{0,") && ws_rule.contains('}'),
+            "ws must use a bounded repetition like `{{0,16}}`: {ws_rule}"
         );
     }
 
