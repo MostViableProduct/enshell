@@ -11,10 +11,14 @@ User: run a health check on this machine
 Assistant: {"intent":"check_system_health","parameters":{},"risk":"read_only","requires_confirmation":true,"explanation":"I will check disk space, memory, CPU load, and critical process status.","confidence":0.97}
 
 [Example 4]
+User: show me the recent system logs
+Assistant: {"intent":"inspect_logs","parameters":{"source":null,"since":null,"filter":null},"risk":"read_only","requires_confirmation":true,"explanation":"I will show the most recent system log entries.","confidence":0.9}
+
+[Example 5]
 User: open the project folder
 Assistant: {"intent":"open_file_or_folder","parameters":{"path":"."},"risk":"read_only","requires_confirmation":true,"explanation":"I will open the current directory in the default file browser.","confidence":0.82}
 
-[Example 5]
+[Example 6]
 User: clean up old build artifacts somehow
 Assistant: {"intent":"ask_clarification","parameters":{"question":"Could you be more specific? Which directory or project should I clean up, and what kind of artifacts (e.g. target/, node_modules/, dist/)?","options":["Clean Rust target/ directory","Remove node_modules/","Delete dist/ or build/ folders"]},"requires_confirmation":false,"explanation":"The request is ambiguous — I need more detail before proposing an action.","confidence":0.3}
 

@@ -244,7 +244,7 @@ pub fn intent_tool_schema() -> Value {
                 "name": "inspect_logs",
                 "description": "Retrieve and display recent log entries from a system or application log.",
                 "parameters": {
-                    "source": { "type": "string", "required": false, "description": "Log source, e.g. 'system', 'nginx', 'postgresql'. Omit for general system logs." },
+                    "source": { "type": "string", "required": false, "description": "Set ONLY to name a specific application/service log such as 'nginx' or 'postgresql'. OMIT for general or system logs — the default already reads the system log." },
                     "since": { "type": "string", "required": false, "description": "Time window, e.g. '1h', '30m', '2024-01-01'. Omit for recent entries." },
                     "filter": { "type": "string", "required": false, "description": "Keyword or pattern to filter log lines." }
                 }
@@ -358,6 +358,20 @@ pub fn few_shot_examples() -> Vec<(&'static str, String)> {
                     "I will check disk space, memory, CPU load, and critical process status."
                         .to_string(),
                 confidence: 0.97,
+            },
+        ),
+        (
+            "show me the recent system logs",
+            ProposedAction {
+                intent: Intent::InspectLogs {
+                    source: None,
+                    since: None,
+                    filter: None,
+                },
+                risk: Some(RiskHint::ReadOnly),
+                requires_confirmation: true,
+                explanation: "I will show the most recent system log entries.".to_string(),
+                confidence: 0.9,
             },
         ),
         (

@@ -229,7 +229,7 @@
           "type": "string"
         },
         "source": {
-          "description": "Log source, e.g. 'system', 'nginx', 'postgresql'. Omit for general system logs.",
+          "description": "Set ONLY to name a specific application/service log such as 'nginx' or 'postgresql'. OMIT for general or system logs — the default already reads the system log.",
           "required": false,
           "type": "string"
         }

@@ -27,13 +27,17 @@
 //!   `du` enumerates all files and the caller chooses with `head`.  Document
 //!   this as a known limitation; a future slice can add `find … -size +<n>`
 //!   pre-filtering.
-//! - `source` and `filter` parameters on [`InspectLogs`] are **not yet
-//!   implemented on any OS**, and `since` is not yet implemented on Windows.
-//!   These are **rejected with [`AdapterError::InvalidParameter`] when present**
-//!   (a future slice will add `--predicate` / grep post-filtering and a Windows
-//!   XPath time query) — the adapter refuses rather than silently render a query
-//!   broader than the request. The unqualified "recent logs" request renders on
-//!   all three OSes; `since` additionally renders on macOS/Linux.
+//! - `source` on [`InspectLogs`] is honored only for the value **`"system"`**
+//!   (case-insensitive) — a synonym for the default system log this adapter
+//!   already reads, so it renders identically to the unqualified request. Any
+//!   *other* `source` (a specific service/app log such as `nginx`), and the
+//!   `filter` parameter, are **not yet implemented on any OS**, and `since` is
+//!   not yet implemented on Windows. Those unsupported parameters are **rejected
+//!   with [`AdapterError::InvalidParameter`] when present** (a future slice will
+//!   add `--predicate` / grep post-filtering and a Windows XPath time query) —
+//!   the adapter refuses rather than silently render a query broader than the
+//!   request. The unqualified "recent logs" request renders on all three OSes;
+//!   `since` additionally renders on macOS/Linux.
 //! - Write/system intents (`InstallPackage`, `KillProcess`, `CompressFolder`,
 //!   `CreateBackup`, `CreateProject`, `GitCommitChanges`, `StartService`,
 //!   `StopService`, `UpdatePackages`) → [`AdapterError::NotYetImplemented`].
@@ -521,15 +525,28 @@ fn render_inspect_logs(
     // Fidelity invariant: the rendered command must honor every parameter the
     // intent specifies, or the adapter must refuse — it must NEVER silently
     // render a *broader* query than asked (enShell never quietly does less than
-    // requested). `source` and `filter` are not yet encodable on any OS, so a
-    // request that carries them is rejected loudly rather than run unfiltered.
-    if source.is_some() {
-        return Err(AdapterError::InvalidParameter {
-            intent: "inspect_logs",
-            reason: "selecting a specific log `source` is not supported yet; omit it to \
-                     query the default system log (otherwise enShell would silently read a \
-                     different/broader log than requested)",
-        });
+    // requested).
+    //
+    // The one `source` we can honor faithfully is "system": on every supported
+    // OS the default log this adapter already queries IS the system log (macOS
+    // unified `log show`, Linux `journalctl`, the Windows `System` channel), so
+    // `source = "system"` names exactly what we render by default — accept it as
+    // a synonym for the unqualified request (identical rendering, never broader).
+    // Any *other* source (a specific service/app log such as "nginx") is not yet
+    // encodable, so a request that carries it is rejected loudly rather than run
+    // against a different log than asked.
+    if let Some(src) = source {
+        if !src.trim().eq_ignore_ascii_case("system") {
+            return Err(AdapterError::InvalidParameter {
+                intent: "inspect_logs",
+                reason: "only the \"system\" log `source` is supported yet — it names the \
+                         default system log this command already reads; a specific source \
+                         such as \"nginx\" is not encodable, so omit it rather than have \
+                         enShell silently read a different/broader log than requested",
+            });
+        }
+        // `source = "system"` is the default system log: fall through and render
+        // the unqualified system-log query, exactly as if `source` were omitted.
     }
     if filter.is_some() {
         return Err(AdapterError::InvalidParameter {
@@ -1183,8 +1200,63 @@ mod tests {
         );
     }
 
-    /// `source` and `filter` are unimplemented on every OS, so a request carrying
-    /// either is rejected uniformly — never silently dropped to a broader query.
+    /// `source = "system"` names the default system log on every OS, so it is
+    /// honored as a synonym for the unqualified request — rendered identically to
+    /// omitting `source` (never rejected, never broadened), case-insensitively and
+    /// tolerant of surrounding whitespace.
+    #[test]
+    fn inspect_logs_accepts_system_source_as_default() {
+        for raw in ["system", "System", "  SYSTEM  "] {
+            for os in [Os::MacOs, Os::Linux, Os::Windows] {
+                let with_system = render(
+                    &Intent::InspectLogs {
+                        source: Some(raw.to_owned()),
+                        since: None,
+                        filter: None,
+                    },
+                    os,
+                )
+                .unwrap_or_else(|e| panic!("source=\"{raw}\" must render on {os:?}: {e:?}"));
+                let unqualified = render(
+                    &Intent::InspectLogs {
+                        source: None,
+                        since: None,
+                        filter: None,
+                    },
+                    os,
+                )
+                .expect("unqualified must render");
+                let a = as_exec(&with_system);
+                let b = as_exec(&unqualified);
+                assert_eq!(
+                    a.program, b.program,
+                    "program differs for source=\"{raw}\" on {os:?}"
+                );
+                assert_eq!(a.args, b.args, "args differ for source=\"{raw}\" on {os:?}");
+            }
+        }
+    }
+
+    /// `source = "system"` must compose with `since` rather than swallow it: the
+    /// accepted source is the default log, and `since` is still honored where the
+    /// OS supports it (Linux here).
+    #[test]
+    fn inspect_logs_system_source_still_honors_since_on_linux() {
+        let intent = Intent::InspectLogs {
+            source: Some("system".to_owned()),
+            since: Some("30m".to_owned()),
+            filter: None,
+        };
+        let plan = render(&intent, Os::Linux).expect("system + since renders on Linux");
+        let step = as_exec(&plan);
+        assert_eq!(step.program, "journalctl");
+        assert_eq!(step.args, vec!["--no-pager", "-n", "200", "--since", "30m"]);
+    }
+
+    /// A *specific* (non-"system") `source` and any `filter` are unimplemented on
+    /// every OS, so a request carrying either is rejected uniformly — never
+    /// silently dropped to a broader query. (`source = "system"` is the one
+    /// accepted value; see `inspect_logs_accepts_system_source_as_default`.)
     #[test]
     fn inspect_logs_rejects_source_and_filter_on_all_supported_os() {
         for os in [Os::MacOs, Os::Linux, Os::Windows] {
