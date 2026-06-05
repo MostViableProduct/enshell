@@ -63,21 +63,54 @@ shasum -a 256 ~/.enshell/models/gemma-4-E2B-it-Q4_K_M.gguf
 # → 9378bc471710229ef165709b62e34bfb62231420ddaf6d729e727305b5b8672d
 ```
 
-enShell auto-discovers `~/.enshell/models/*.gguf`, so the eval and CLI below find
-it without `--model`/`ENSHELL_MODEL` once it's in that directory.
+The **CLI** auto-discovers `~/.enshell/models/*.gguf` (so `enshell` finds the model
+without `$ENSHELL_MODEL` — step 2 below). The **eval** is explicit: it uses the real
+model only when you pass `--model <path>`; with no `--model` it runs the stub + fast
+path end-to-end instead.
 
 ### 1. Score the model against the fixtures
 
 ```bash
-cargo run -p enshell-eval --features llama -- \
-  --model /path/to/gemma-4-e2b-instruct.Q4_K_M.gguf
+# Real model in isolation (fast path bypassed). `--threshold 0` just measures;
+# the default threshold is 100, which exits non-zero unless every case passes.
+cargo run --release -p enshell-eval --features llama -- \
+  --model ~/.enshell/models/gemma-4-E2B-it-Q4_K_M.gguf --threshold 0
 ```
 
 This runs every fixture through the real model (decoding is automatically
 **GBNF-constrained** to a valid `ProposedAction` shape with a known intent name —
-see `enshell-model::grammar`), then scores the produced intents. It prints the
-per-case failures and the overall accuracy. Add `--threshold 90` to get a non-zero
-exit below 90%.
+see `enshell-model::grammar`), then scores the produced intents and prints the
+per-case failures and overall accuracy. `--threshold` defaults to **100** (exit
+non-zero below that); pass `--threshold 0` to just measure, or `--threshold <N>` to
+gate at N%.
+
+#### Recorded result — Gemma 4 E2B (2026-06-04)
+
+First end-to-end verification of the real-model path. Greedy + GBNF-constrained
+decoding is deterministic, so this reproduces exactly against the pinned file.
+
+| Field | Value |
+|---|---|
+| Command | `cargo run --release -p enshell-eval --features llama -- --model ~/.enshell/models/gemma-4-E2B-it-Q4_K_M.gguf --threshold 0` |
+| Model | `gemma-4-E2B-it-Q4_K_M.gguf`, SHA-256 `9378bc47…b8672d` (the pin above) |
+| Hardware | Apple M1 Pro, 16 GB, macOS 26.5 — Metal, 36/36 layers offloaded |
+| Wall time | ~239 s for model load + all 19 cases (~13 s/case; the ~3.4k-token prompt dominates) |
+| Result | **14/19 (73.7%)** raw intent accuracy (model in isolation, fast path bypassed) |
+
+Failures — in normal use the fast path resolves the common phrasings before the
+model is reached, so everyday accuracy is higher than this isolated number:
+
+| Case | Failure | Bucket |
+|---|---|---|
+| `large-downloads-model` | path `"Downloads"` vs expected `"~/Downloads"` | path normalization |
+| `health-check` | no intent (clarified/errored) | model miss |
+| `disk-usage` | no intent (clarified/errored) | model miss |
+| `logs-recent` | added `source = "system"` | extra param |
+| `logs-short` | added `source = "system"` | extra param |
+
+These point at prompt / few-shot tuning. (The adapter already rejects the `source`
+param the model adds — see the `inspect_logs` fidelity note in `enshell-adapters`.)
+Raising this toward a pass threshold is the accuracy-tuning step.
 
 ### 2. Smoke-test the end-to-end CLI
 

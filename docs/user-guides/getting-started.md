@@ -27,8 +27,9 @@ enShell is in **early development**. Today it:
   safely — a clarifying question when it's unrecognised, or a refusal when it maps to
   a known but not-yet-supported action (e.g. a package install). It never guesses.
 
-It does **not** yet run write/system actions, support **every** workflow on Windows,
-or perform live inference with a downloaded Gemma model. See
+It does **not** yet run write/system actions or support **every** workflow on
+Windows. Live inference with a downloaded Gemma model now works but is **early**
+(verified to run; ~74% raw model accuracy so far — see below). See
 [Not yet available](#not-yet-available).
 
 ## Install and run
@@ -175,9 +176,16 @@ If no model file is found, enShell falls back to the stub. `enshell doctor` repo
 whether a model **candidate** was found — it does not load the weights, so a present
 file is not a guarantee the model will load.
 
-> **Status: experimental and unverified.** The llama.cpp/Gemma 4 path is compiled
-> and type-checked in CI on macOS and Linux, but live inference against a real model
-> has **not** yet been verified end to end. Treat it as wired-but-unproven.
+> **Status: verified to run, but early.** The llama.cpp/Gemma 4 path is compiled
+> and type-checked in CI on macOS and Linux, and live inference has now been
+> verified end to end on Apple Silicon (Metal) against Gemma 4 E2B — the first real
+> run scored **73.7% (14/19) raw intent accuracy** on the read-only eval set (the
+> model in isolation; in normal use the fast path resolves the common phrasings
+> before the model is reached, so everyday accuracy is higher). It is **not**
+> exercised in CI (real inference needs hardware + weights) and accuracy tuning is
+> ongoing, so treat it as proven-but-early rather than production-ready. See
+> [the model-verification runbook](../contributor-guides/model-verification.md) for
+> the exact model, command, and results.
 
 ## Inspecting what happened
 
@@ -258,7 +266,9 @@ than pretend:
   needs the last command's *text*, which is opt-in capture (not the default).
   (`enshell explain-last` **is** available once the shell hook is installed — see
   [Shell integration](#shell-integration-optional-opt-in).)
-- **Verified live Gemma inference** — see the experimental note above.
+- **Production-grade / CI-exercised live inference** — live inference is verified to
+  *run* (73.7% raw accuracy on Gemma 4 E2B), but it isn't exercised in CI and the
+  model accuracy isn't yet tuned to a pass bar. See the experimental note above.
 
 ## See also
 

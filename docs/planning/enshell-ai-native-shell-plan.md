@@ -1385,7 +1385,7 @@ inputs to the plan (and reflected in the relevant sections above).
 | # | Question | Why it matters | Leaning |
 |---|---|---|---|
 | A | llama.cpp via Rust FFI bindings or subprocess server? | Build complexity, portability, packaging. | Evaluate in Phase 0; lean bindings for a single binary, subprocess as fallback. |
-| B | Confirm **E2B Q4** clears the intent-accuracy eval bar on the 8 GB reference machine (else step up to E4B or adjust quant). | The §13 perf targets and default profile depend on it. | Validate against the §14 eval set in Phase 0/1; E4B is the ready upgrade if E2B falls short. |
+| B | Confirm **E2B Q4** clears the intent-accuracy eval bar on the 8 GB reference machine (else step up to E4B or adjust quant). | The §13 perf targets and default profile depend on it. | Validate against the §14 eval set in Phase 0/1; E4B is the ready upgrade if E2B falls short. **First measurement (2026-06-04): E2B Q4 = 73.7% raw (14/19) in isolation on M1 Pro / 16 GB (not the 8 GB reference); pass bar not yet set, prompt/few-shot tuning pending — see the model-verification runbook.** |
 | C | Default **confidence threshold** value (placeholder 0.55). | Too low → risky guesses; too high → over-asking. | Tune empirically against the eval set. |
 | D | Exact per-action **undo mechanics** for Phase 3 write/system actions per OS. | Reversibility promise for non-read-only tiers. | Design alongside Phase 3 with the recovery-tier model. |
 

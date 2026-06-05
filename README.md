@@ -37,9 +37,13 @@ The real **Gemma 4 / llama.cpp provider is now wired** behind an optional `llama
 Cargo feature: when you build with `--features llama` and a GGUF model is present
 (via `$ENSHELL_MODEL` or the default path), the CLI selects it at runtime and falls
 back to the stub if no model is found. This path is **compile-verified in CI on
-macOS and Linux**, but **live inference against a real model has not yet been
-verified end to end** — treat the llama provider as wired-but-unproven for now
-(`enshell doctor` reports it as a *candidate*, since it doesn't load the weights).
+macOS and Linux**, and live inference has now been **verified end to end** on Apple
+Silicon (Metal) against Gemma 4 E2B — the first real run measured **73.7% (14/19)
+raw intent accuracy** on the read-only eval set (model in isolation; in normal use
+the fast path resolves common phrasings before the model is reached). It is **not
+exercised in CI** (real inference needs hardware + weights) and accuracy tuning is
+ongoing, so treat the provider as **proven-but-early** (`enshell doctor` reports it
+as a *candidate*, since it doesn't load the weights).
 Write/system actions are designed but not yet executable (read-only only). Not a
 finished product.
 
