@@ -176,6 +176,26 @@ for these fixtures, add request-context repair, or steer the model to omit it. T
 `Downloads` → `~/Downloads` case is the deliberately-deferred context-dependent
 rewrite.
 
+#### Recorded result — after fixture correction (2026-06-05, Metal): 18/19
+
+That product decision was resolved by **accepting the valid optional refinements**
+for the recent-logs fixtures (commit `473f7da`): "show me recent logs" may carry
+`source` (the system log is the implied default) and/or `since` (a "recent" window)
+— both faithful, so `allowed:["source","since"]`. This is robust to the Metal
+non-determinism above: the logs cases now pass whichever valid optional the model
+lands on.
+
+| Result | **18/19 (94.7%)** raw intent accuracy — best measured |
+|---|---|
+
+| Case | Failure | Bucket |
+|---|---|---|
+| `large-downloads-model` | path `"Downloads"` vs `"~/Downloads"` | path (context-dependent; **deferred**) |
+
+The sole remaining failure is the deliberately-deferred `Downloads` → `~/Downloads`
+rewrite (needs a request-context repair layer with NL + cwd; not a parse-time fix).
+The default stub + fast-path eval remains 19/19 (100%).
+
 ### 2. Smoke-test the end-to-end CLI
 
 ```bash

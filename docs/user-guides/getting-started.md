@@ -29,7 +29,7 @@ enShell is in **early development**. Today it:
 
 It does **not** yet run write/system actions or support **every** workflow on
 Windows. Live inference with a downloaded Gemma model now works but is **early**
-(verified to run; best measured **16/19 ≈ 84% raw** on Metal, up from a 14/19 first
+(verified to run; best measured **18/19 ≈ 95% raw** on Metal, up from a 14/19 first
 baseline — see below). See [Not yet available](#not-yet-available).
 
 ## Install and run
@@ -179,8 +179,8 @@ file is not a guarantee the model will load.
 > **Status: verified to run, but early.** The llama.cpp/Gemma 4 path is compiled
 > and type-checked in CI on macOS and Linux, and live inference has now been
 > verified end to end on Apple Silicon (Metal) against Gemma 4 E2B — best measured
-> **16/19 (84.2%) raw intent accuracy** on the read-only eval set (a 14/19 first
-> baseline, raised by grammar + parser fixes; model in isolation; in normal use the
+> **18/19 (94.7%) raw intent accuracy** on the read-only eval set (a 14/19 first
+> baseline, raised by grammar, parser, and eval-fixture fixes; model in isolation; in normal use the
 > fast path resolves the common phrasings before the model is reached, so everyday
 > accuracy is higher). It is **not**
 > exercised in CI (real inference needs hardware + weights) and accuracy tuning is
@@ -268,7 +268,7 @@ than pretend:
   (`enshell explain-last` **is** available once the shell hook is installed — see
   [Shell integration](#shell-integration-optional-opt-in).)
 - **Production-grade / CI-exercised live inference** — live inference is verified to
-  *run* (best measured 16/19 ≈ 84% raw on Gemma 4 E2B), but it isn't exercised in CI
+  *run* (best measured 18/19 ≈ 95% raw on Gemma 4 E2B), but it isn't exercised in CI
   and the model accuracy isn't yet tuned to a pass bar. See the experimental note above.
 
 ## See also

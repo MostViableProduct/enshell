@@ -38,10 +38,10 @@ Cargo feature: when you build with `--features llama` and a GGUF model is presen
 (via `$ENSHELL_MODEL` or the default path), the CLI selects it at runtime and falls
 back to the stub if no model is found. This path is **compile-verified in CI on
 macOS and Linux**, and live inference has now been **verified end to end** on Apple
-Silicon (Metal) against Gemma 4 E2B — best measured **16/19 (84.2%) raw intent
-accuracy** on the read-only eval set (a 14/19 first baseline, raised by grammar +
-parser fixes; model in isolation; in normal use the fast path resolves common
-phrasings before the model is reached). It is **not
+Silicon (Metal) against Gemma 4 E2B — best measured **18/19 (94.7%) raw intent
+accuracy** on the read-only eval set (a 14/19 first baseline, raised by grammar,
+parser, and eval-fixture fixes; model in isolation; in normal use the fast path
+resolves common phrasings before the model is reached). It is **not
 exercised in CI** (real inference needs hardware + weights) and accuracy tuning is
 ongoing, so treat the provider as **proven-but-early** (`enshell doctor` reports it
 as a *candidate*, since it doesn't load the weights).
