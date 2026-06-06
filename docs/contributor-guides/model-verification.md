@@ -87,8 +87,15 @@ gate at N%.
 #### Recorded result — Gemma 4 E2B (2026-06-04, baseline, pre-robustness-fixes)
 
 First end-to-end verification of the real-model path, **before** the inspect_logs /
-grammar / parser-normalization changes below. Greedy + GBNF-constrained decoding is
-deterministic, so this reproduces exactly against the pinned file *at that commit*.
+grammar / parser-normalization changes below.
+
+> **Reproducibility caveat (important).** Greedy + GBNF decoding is deterministic on
+> **CPU**, but **not** on **Metal/GPU**: the attention kernels use non-deterministic
+> parallel reductions, so for *borderline* tokens (near-tied top-2 logits) the argmax
+> can flip run-to-run on the same machine, model, and binary. The aggregate score is
+> stable (~16/19 here), but specific borderline cases move — e.g. `logs-recent`/
+> `logs-short` were observed failing on `since="1h"` one run and `source="system"` the
+> next, with no code change. Per-case results are only exactly reproducible on CPU.
 
 | Field | Value |
 |---|---|

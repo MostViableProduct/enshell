@@ -7,8 +7,8 @@
 {"id":"large-downloads-model","nl":"show me the biggest files in Downloads","kind":"find_large_files","required":{"path":"~/Downloads"},"allowed":["limit"]}
 {"id":"health-check","nl":"run a system health check","kind":"check_system_health","required":{},"allowed":[]}
 {"id":"health-short","nl":"check system health","kind":"check_system_health","required":{},"allowed":[]}
-{"id":"logs-recent","nl":"show me recent logs","kind":"inspect_logs","required":{},"allowed":[]}
-{"id":"logs-short","nl":"show recent logs","kind":"inspect_logs","required":{},"allowed":[]}
+{"id":"logs-recent","nl":"show me recent logs","kind":"inspect_logs","required":{},"allowed":["source","since"]}
+{"id":"logs-short","nl":"show recent logs","kind":"inspect_logs","required":{},"allowed":["source","since"]}
 {"id":"open-notes","nl":"open /tmp/notes.txt","kind":"open_file_or_folder","required":{"path":"/tmp/notes.txt"},"allowed":[]}
 {"id":"open-home","nl":"open ~/Documents","kind":"open_file_or_folder","required":{"path":"~/Documents"},"allowed":[]}
 {"id":"list-processes","nl":"list running processes","kind":"list_processes","required":{},"allowed":[]}
