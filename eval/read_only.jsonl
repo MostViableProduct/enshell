@@ -17,3 +17,8 @@
 {"id":"network-connections","nl":"show network connections","kind":"network_connections","required":{},"allowed":[]}
 {"id":"git-status","nl":"git status","kind":"git_status","required":{},"allowed":[]}
 {"id":"show-memory","nl":"show memory usage","kind":"show_memory","required":{},"allowed":[]}
+{"id":"cheap-port-holding","nl":"which application is holding on to port 8080","kind":"find_process_using_port","required":{"port":8080},"allowed":[]}
+{"id":"cheap-large-downloads-paraphrase","nl":"which files are the largest in Downloads","kind":"find_large_files","required":{"path":"~/Downloads"},"allowed":["limit"]}
+{"id":"cheap-health-rundown","nl":"give me a rundown of this machine's overall health","kind":"check_system_health","required":{},"allowed":[]}
+{"id":"cheap-memory-free","nl":"how much memory is free right now","kind":"show_memory","required":{},"allowed":[]}
+{"id":"cheap-network-active","nl":"list the active network connections","kind":"network_connections","required":{},"allowed":[]}

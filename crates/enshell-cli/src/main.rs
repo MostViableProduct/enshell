@@ -47,12 +47,14 @@ const PROMPT_TEMPLATE_VERSION: &str = "v1";
 
 /// Choose the `model_id` to record for an audited action.
 ///
-/// A fast-path intent is produced by trusted Rust with **no model call**, so it
-/// is recorded as `"fast_path"`; everything else carries the provider's name
-/// (`"stub"` or the llama.cpp model). See [`enshell_core::IntentSource`].
+/// The fast path and the cheap resolver both produce trusted Rust intents with
+/// **no model call**, recorded as `"fast_path"` / `"cheap_resolver"`; everything
+/// else carries the provider's name (`"stub"` or the llama.cpp model). See
+/// [`enshell_core::IntentSource`].
 fn model_id_for(source: enshell_core::IntentSource, provider_name: &str) -> String {
     match source {
         enshell_core::IntentSource::FastPath => "fast_path".to_owned(),
+        enshell_core::IntentSource::CheapResolver => "cheap_resolver".to_owned(),
         enshell_core::IntentSource::Model => provider_name.to_owned(),
     }
 }
@@ -2018,6 +2020,10 @@ mod tests {
         assert_eq!(
             model_id_for(IntentSource::FastPath, "gemma-4 (llama.cpp)"),
             "fast_path"
+        );
+        assert_eq!(
+            model_id_for(IntentSource::CheapResolver, "gemma-4 (llama.cpp)"),
+            "cheap_resolver"
         );
         assert_eq!(model_id_for(IntentSource::Model, "stub"), "stub");
         assert_eq!(

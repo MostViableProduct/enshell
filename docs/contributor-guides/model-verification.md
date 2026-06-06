@@ -24,11 +24,14 @@ cargo run -p enshell-eval
 `--threshold <0-100>` makes the process exit non-zero below that accuracy (default
 100). Two measurement modes:
 
-- **default** — end-to-end via `Orchestrator::resolve` (fast path **then** model),
-  i.e. what a user actually gets.
-- **`--model <path>`** — every case through the **model in isolation**, fast path
-  bypassed. This is the number that answers "does the model produce correct
-  intents?" — without it, the fast path would silently resolve the common
+- **default** — end-to-end via `Orchestrator::resolve`, i.e. what a user actually
+  gets: **fast path → cheap resolver → model** (the two deterministic layers run
+  first; only requests they decline reach the model). Audited `model_id` is
+  `fast_path` / `cheap_resolver` / the provider name accordingly.
+- **`--model <path>`** — every case through the **model in isolation**, both the
+  fast path and the cheap resolver bypassed (`run_provider_only` calls the provider
+  directly). This is the number that answers "does the model produce correct
+  intents?" — without it, the deterministic layers would silently resolve the common
   phrasings and hide the model's real accuracy.
 
 ## Verifying a real model (E2B)
@@ -236,6 +239,15 @@ Add lines to [`eval/read_only.jsonl`](../../eval/read_only.jsonl):
 A new case must be resolvable by **both** the stub (so the `cargo test` gate stays
 green) and, ideally, exercise a real model phrasing. Keep cases read-only (the MVP
 executes read-only only).
+
+The fixture set also includes a handful of `cheap-*` cases: conservative
+*paraphrases* that the fast path does not match but the cheap resolver
+(`enshell-core::cheap_resolver`) does — e.g. `cheap-port-holding` ("which
+application is holding on to port 8080") and `cheap-large-downloads-paraphrase`
+("which files are the largest in Downloads" → `~/Downloads`, the NL-aware
+normalization the trusted parser deliberately does not do). In the default eval
+these resolve via the cheap resolver before any model; in `--model` mode they
+measure the model on the same paraphrases.
 
 ## Notes
 

@@ -48,7 +48,9 @@ use enshell_policy::{
     ClassifyContext, RiskDecision, RiskTier,
 };
 
+pub mod cheap_resolver;
 pub mod fastpath;
+pub use cheap_resolver::cheap_resolve;
 pub use fastpath::fast_path_match;
 
 // ---------------------------------------------------------------------------
@@ -62,6 +64,9 @@ pub enum IntentSource {
     /// Resolved deterministically by [`fast_path_match`] — **no model call**.
     /// Audited as `model_id = "fast_path"`.
     FastPath,
+    /// Resolved by the rule-based [`cheap_resolve`] middle layer — **no model
+    /// call**. Audited as `model_id = "cheap_resolver"`.
+    CheapResolver,
     /// Produced by the [`ModelProvider`] (e.g. the stub or the llama.cpp backend).
     /// Audited with that provider's name.
     Model,
@@ -156,6 +161,18 @@ impl<P: ModelProvider> Orchestrator<P> {
                 intent,
                 explanation: explanation.to_owned(),
                 source: IntentSource::FastPath,
+            });
+        }
+
+        // Step 0.5: rule-based cheap resolver — conservative paraphrases of the
+        // same read-only catalog, still a **trusted, typed** intent with NO model
+        // call. High-precision: it returns None on any ambiguity, compound, or
+        // unencodable parameter, so anything uncertain still reaches the model.
+        if let Some((intent, explanation)) = cheap_resolve(user_request) {
+            return Ok(Resolved::Intent {
+                intent,
+                explanation,
+                source: IntentSource::CheapResolver,
             });
         }
 
@@ -1002,10 +1019,10 @@ mod tests {
         }
     }
 
-    /// A request the fast path does not recognise DOES call the model, and the
-    /// resulting action is tagged `IntentSource::Model`.
+    /// A request neither deterministic layer (fast path, cheap resolver) recognises
+    /// DOES call the model, and the resulting action is tagged `IntentSource::Model`.
     #[test]
-    fn fast_path_miss_calls_the_model_and_tags_model_source() {
+    fn deterministic_miss_calls_the_model_and_tags_model_source() {
         let calls = Arc::new(AtomicUsize::new(0));
         let json = make_json(
             &Intent::FindProcessUsingPort { port: 3000 },
@@ -1018,16 +1035,16 @@ mod tests {
         };
         let orch = Orchestrator::new(provider, OrchestratorConfig::default());
 
-        // " port 3000" is present but the prefix is unknown and a qualifier
-        // trails the number, so the fast path declines and the model runs.
+        // No port/file/log/health/etc. keyword and no known phrasing, so both the
+        // fast path and the cheap resolver decline and the model runs.
         let prepared = orch
-            .prepare("tell me the process on port 3000 holding it")
+            .prepare("give me a deployment summary")
             .expect("prepare ok");
 
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
-            "a fast-path miss must call the model exactly once"
+            "a fast-path + cheap-resolver miss must call the model exactly once"
         );
         match prepared {
             Prepared::Actionable(a) => {
@@ -1103,16 +1120,86 @@ mod tests {
 
     #[test]
     fn resolve_model_path_tags_model_source() {
-        // The fast path misses this phrasing (unknown prefix), so the stub model
-        // resolves it — the source must be Model, not FastPath.
-        let orch = orchestrator_with_stub();
+        // A request neither the fast path nor the cheap resolver recognises falls
+        // through to the (here fixed) model — the source must be Model.
+        let json = make_json(
+            &Intent::FindProcessUsingPort { port: 22 },
+            "I will check that port.",
+            0.9,
+        );
+        let orch = orchestrator_fixed(json);
         match orch
-            .resolve("show me what is listening on port 22")
+            .resolve("give me a deployment summary")
             .expect("resolve ok")
         {
             Resolved::Intent { intent, source, .. } => {
                 assert_eq!(source, IntentSource::Model);
                 assert!(matches!(intent, Intent::FindProcessUsingPort { port: 22 }));
+            }
+            Resolved::Clarify { .. } => panic!("expected Intent, got Clarify"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // cheap resolver (§ middle layer) — paraphrases, NO model call
+    // -----------------------------------------------------------------------
+
+    /// A paraphrase the fast path lacks but the cheap resolver handles resolves
+    /// WITHOUT calling the model and is tagged `IntentSource::CheapResolver`.
+    #[test]
+    fn cheap_resolver_hit_skips_the_model() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let json = make_json(
+            &Intent::AskClarification {
+                question: "unused".to_owned(),
+                options: None,
+            },
+            "unused",
+            0.3,
+        );
+        let provider = CountingProvider {
+            calls: calls.clone(),
+            json,
+        };
+        let orch = Orchestrator::new(provider, OrchestratorConfig::default());
+
+        // Not a fast-path phrasing (unknown prefix), but the cheap resolver matches.
+        let prepared = orch
+            .prepare("which application is holding on to port 8080")
+            .expect("prepare ok");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "the cheap resolver must NOT call the model"
+        );
+        match prepared {
+            Prepared::Actionable(a) => {
+                assert_eq!(a.source(), IntentSource::CheapResolver);
+                assert!(
+                    matches!(a.intent(), Intent::FindProcessUsingPort { port: 8080 }),
+                    "got {:?}",
+                    a.intent()
+                );
+            }
+            other => panic!("expected Actionable, got {:?}", variant_name(&other)),
+        }
+    }
+
+    /// `resolve()` tags a cheap-resolver paraphrase as `IntentSource::CheapResolver`.
+    #[test]
+    fn resolve_cheap_path_returns_cheap_resolver_source() {
+        let orch = orchestrator_with_stub();
+        match orch
+            .resolve("what are the biggest files under /var/log")
+            .expect("resolve ok")
+        {
+            Resolved::Intent { intent, source, .. } => {
+                assert_eq!(source, IntentSource::CheapResolver);
+                assert!(
+                    matches!(intent, Intent::FindLargeFiles { ref path, .. } if path == "/var/log"),
+                    "got {intent:?}"
+                );
             }
             Resolved::Clarify { .. } => panic!("expected Intent, got Clarify"),
         }

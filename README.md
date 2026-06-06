@@ -56,12 +56,15 @@ classifies its risk, renders the correct OS-specific command (as a structured pl
 not a shell string), previews it in plain English, and executes only after you
 confirm.
 
-Common, unambiguous requests (e.g. "what is using port 3000") are resolved by a
-**deterministic fast path** *before* any model runs — instant, model-independent,
-and audited as `model_id = fast_path`. The fast path produces a trusted typed
-intent and still goes through the identical policy → render → confirm gate; it
-only declines (handing off to the model) when a request carries parameters it
-shouldn't guess at.
+Requests are resolved by **four layers, tried in order**: a **deterministic fast
+path** (exact known phrasings), a rule-based **cheap resolver** (conservative
+paraphrases of the same read-only catalog), then the model — the **stub** by
+default, or **llama.cpp / Gemma 4** with `--features llama`. The first two run
+*before* any model — instant, model-independent, producing a trusted typed intent —
+and are audited as `model_id = fast_path` / `cheap_resolver`. Both are
+high-precision: on any ambiguity, compound request, write/system verb, or a
+parameter they can't faithfully encode, they decline and hand off to the model. All
+four paths feed the identical policy → render → confirm gate.
 
 ## Documentation
 

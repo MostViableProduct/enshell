@@ -71,22 +71,31 @@ Run this? [y/N]
 Nothing runs until you answer `y`. The literal command is always shown — enShell
 never hides what it will run.
 
-## How a request is resolved: three paths
+## How a request is resolved: four paths
 
-A request is turned into a *structured intent* by one of three resolvers, in order.
-Each produces the same kind of typed intent and is then subjected to the **same**
-policy → render → confirm gate (see [the safety model](../security/safety-model.md)).
-The audit log records which one ran in its `model_id` field:
+A request is turned into a *structured intent* by one of four resolvers, tried **in
+order**. Each produces the same kind of typed intent and is then subjected to the
+**same** policy → render → confirm gate (see
+[the safety model](../security/safety-model.md)). The audit log records which one ran
+in its `model_id` field:
 
 | Path | When it runs | `model_id` in the audit log |
 |---|---|---|
 | **Fast path** | A common, unambiguous phrasing matches a known template — **no model is called**. | `fast_path` |
-| **Stub model** | Default build, fast path missed — a deterministic, offline stand-in interprets the request. | `stub` |
+| **Cheap resolver** | Fast path missed, but a conservative rule-based paraphrase match succeeds — **no model is called**. | `cheap_resolver` |
+| **Stub model** | Default build, both deterministic layers missed — a deterministic, offline stand-in interprets the request. | `stub` |
 | **llama.cpp / Gemma 4** | Built with `--features llama` and a model file is present (see below). | `gemma-4 (llama.cpp)` |
 
-The fast path is deliberately conservative: it only matches phrasings whose intent
-is unambiguous and fully specified (e.g. a bare port number). A request carrying
-extra qualifiers it shouldn't guess at falls through to the model.
+The fast path and the cheap resolver are both deterministic, trusted-Rust layers
+that run **before** any model. The fast path matches only exact/near-exact known
+phrasings; the cheap resolver widens that to conservative *paraphrases* of the same
+read-only catalog (e.g. "which app is holding port 8080", "the biggest files under
+/var/log"). Both are **high-precision**: on any ambiguity, a compound request, a
+write/system verb, or a parameter they can't faithfully encode (a second port, a
+`min_size`, a specific log source), they decline and the request falls through to
+the model. Unlike the fast path, the cheap resolver is natural-language-aware, so it
+may map a clear "Downloads" to `~/Downloads` — a context-dependent rewrite the
+trusted parser deliberately does **not** do.
 
 ## Commands and flags
 

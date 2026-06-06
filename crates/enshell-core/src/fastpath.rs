@@ -233,7 +233,10 @@ pub fn fast_path_match(user_request: &str) -> Option<(Intent, &'static str)> {
 
 /// Normalize a request for matching: trim, lowercase, collapse internal
 /// whitespace to single spaces, and strip trailing `? . !` punctuation.
-fn normalize(s: &str) -> String {
+///
+/// Shared with [`crate::cheap_resolver`] so both deterministic layers normalize
+/// identically.
+pub(crate) fn normalize(s: &str) -> String {
     let lowered = s.trim().to_lowercase();
     let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed
@@ -284,7 +287,9 @@ fn match_open(norm: &str, original: &str) -> Option<Intent> {
 
 /// A conservative "is this an explicit filesystem path?" check: POSIX absolute,
 /// home-relative, explicit relative (`./`, `../`), or a Windows drive root.
-fn looks_like_path(s: &str) -> bool {
+///
+/// Shared with [`crate::cheap_resolver`].
+pub(crate) fn looks_like_path(s: &str) -> bool {
     s.starts_with('/')
         || s.starts_with('~')
         || s.starts_with("./")
@@ -293,7 +298,7 @@ fn looks_like_path(s: &str) -> bool {
 }
 
 /// True for a Windows drive prefix like `c:\` or `c:/`.
-fn is_windows_drive(s: &str) -> bool {
+pub(crate) fn is_windows_drive(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
 }
