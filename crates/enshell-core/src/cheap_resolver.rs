@@ -75,6 +75,11 @@ const DISQUALIFYING_VERBS: &[&str] = &[
     "write",
     "edit",
     "set",
+    // Firewall / port-config verbs: "allow/block/forward ... on port N" is a write,
+    // not read-only port inspection — defer to the model/policy.
+    "allow",
+    "block",
+    "forward",
 ];
 
 /// Conservatively resolve a request to a trusted typed [`Intent`] with a short,
@@ -168,6 +173,12 @@ fn match_port(n: &str) -> Option<(Intent, String)> {
         return None;
     }
     // Must read as a port *lookup*, not some other use of the word "port".
+    //
+    // NOTE: "open" is deliberately NOT a cue. As a leading imperative it means a
+    // firewall/port-config write ("open port 3000"), which must fall through to the
+    // model, not be narrowed to read-only inspection. The legitimate "...port 5000
+    // open" phrasing still resolves via the "which"/"has"/"using" cues; firewall
+    // verbs (allow/block/forward) are caught by the disqualifier gate upstream.
     let lookup = any_word(
         n,
         &[
@@ -181,7 +192,6 @@ fn match_port(n: &str) -> Option<(Intent, String)> {
             "owns",
             "owning",
             "occupying",
-            "open",
             "has",
             "which",
             "what",
@@ -601,6 +611,26 @@ mod tests {
         assert_eq!(intent_of("what is using ports 3000-4000"), None); // range
         assert_eq!(intent_of("what is using the http port"), None); // no number
         assert_eq!(intent_of("what is using port 99999"), None); // out of range
+    }
+
+    // --- negative: imperative / firewall port writes must NOT be read as a
+    //     read-only port lookup (they must fall through to the model). ----------
+    #[test]
+    fn rejects_imperative_and_firewall_port_requests() {
+        // "open" as a leading imperative is a firewall/config write, not inspection.
+        assert_eq!(intent_of("open port 3000"), None);
+        assert_eq!(intent_of("open firewall port 3000"), None);
+        // Firewall verbs are disqualified even with a legit cue word like "on".
+        assert_eq!(intent_of("allow port 3000"), None);
+        assert_eq!(intent_of("allow incoming on port 3000"), None);
+        assert_eq!(intent_of("block port 8080"), None);
+        assert_eq!(intent_of("forward port 3000 to 8080"), None);
+        // Sanity: the legitimate "...port 5000 open" phrasing still resolves
+        // (via the "which"/"has" cues, not "open").
+        assert_eq!(
+            intent_of("which process has port 5000 open"),
+            Some(Intent::FindProcessUsingPort { port: 5000 })
+        );
     }
 
     // --- positive: large files (deictic, downloads, explicit path) ---------

@@ -135,7 +135,21 @@ impl ModelProvider for StubProvider {
     fn infer(&self, request: &ModelRequest) -> Result<String, ModelError> {
         let lower = request.user_request.to_lowercase();
 
-        let proposed = if let Some(intent) = try_match_port(&lower) {
+        let proposed = if is_port_config_write(&lower) {
+            // "open/allow/block/forward ... port N" (or a firewall request) is a
+            // write/config action, NOT read-only port inspection — defer rather
+            // than narrow it to `find_process_using_port`.
+            build_proposed(
+                Intent::AskClarification {
+                    question: "That reads like a firewall/port change, which I can't \
+                               do yet. Did you mean to see which process is using that port?"
+                        .to_string(),
+                    options: None,
+                },
+                "I need more information to help with that.",
+                0.3,
+            )
+        } else if let Some(intent) = try_match_port(&lower) {
             build_proposed(
                 intent,
                 "I will check which process is listening on that port.",
@@ -218,6 +232,21 @@ impl ModelProvider for StubProvider {
 // ---------------------------------------------------------------------------
 // Match helpers (all operate on the lowercased request)
 // ---------------------------------------------------------------------------
+
+/// True if the request reads as a firewall / port-config **write** ("open port
+/// 3000", "allow incoming on port 3000", "forward port 3000", a firewall rule) as
+/// opposed to read-only port inspection. Such requests must not be narrowed to
+/// `find_process_using_port`. (`open <path>` without "port" is unaffected.)
+fn is_port_config_write(lower: &str) -> bool {
+    if !lower.contains("port") {
+        return false;
+    }
+    lower.starts_with("open ")
+        || lower.contains("allow ")
+        || lower.contains("block ")
+        || lower.contains("forward ")
+        || lower.contains("firewall")
+}
 
 /// Returns a `FindProcessUsingPort` intent if the request mentions "port" and
 /// contains a valid port number (first run of ASCII digits in 1..=65535).
@@ -422,6 +451,25 @@ mod tests {
     fn port_8080_returns_correct_port() {
         let action = infer_and_parse("show me what is listening on port 8080");
         assert_eq!(action.intent, Intent::FindProcessUsingPort { port: 8080 });
+    }
+
+    /// A firewall / port-config write must NOT be narrowed to read-only port
+    /// inspection — the stub defers (clarifies) instead.
+    #[test]
+    fn port_config_writes_are_not_read_as_port_inspection() {
+        for req in [
+            "open port 3000",
+            "open firewall port 3000",
+            "allow incoming on port 3000",
+            "forward port 3000 to 8080",
+        ] {
+            let action = infer_and_parse(req);
+            assert!(
+                matches!(action.intent, Intent::AskClarification { .. }),
+                "`{req}` must defer to clarification, got {:?}",
+                action.intent
+            );
+        }
     }
 
     // ------------------------------------------------------------------

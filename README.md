@@ -69,8 +69,8 @@ four paths feed the identical policy → render → confirm gate.
 ## Documentation
 
 - 🚀 **[Getting started](docs/user-guides/getting-started.md)** — install, the
-  request families that work today, commands & flags, and the three resolution
-  paths (fast-path / stub / llama). *Authoritative for current behavior.*
+  request families that work today, commands & flags, and the four resolution
+  paths (fast-path / cheap-resolver / stub / llama). *Authoritative for current behavior.*
 - 🛡️ **[Safety model](docs/security/safety-model.md)** — the trust boundary, risk
   tiers, the Confirmation Invariant, the no-shell executor, and the audit log.
 - 📄 **[Full plan](docs/planning/enshell-ai-native-shell-plan.md)** — the complete
